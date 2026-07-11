@@ -116,6 +116,15 @@ func main() {
 	// GET /api/hashes/:importID  (importID may be a numeric id or "latest")
 	protected.GET("/hashes/:importID", internal.HandleHashes)
 
+	// Phase 5a — native automation endpoints: make SBV headless + agent-drivable
+	// (kick off a custody-preserving extraction, poll it, export it, list backups)
+	// without the Python facade orchestrating an upload+poll loop. Same auth +
+	// no-cache middleware as every other protected route.
+	protected.POST("/automation/extract", internal.HandleAutomationExtract)
+	protected.GET("/automation/status/:id", internal.HandleAutomationStatus)
+	protected.GET("/automation/export/:id", internal.HandleAutomationExport)
+	protected.GET("/automation/backups", internal.HandleAutomationBackups)
+
 	// Health check
 	e.GET("/api/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
