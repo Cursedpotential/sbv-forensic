@@ -15,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lowcarbdev/sbv/internal"
 	"golang.org/x/term"
+	"golang.org/x/time/rate"
 )
 
 var logger *slog.Logger
@@ -67,6 +68,18 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Periodically clean up expired sessions
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			if err := internal.CleanExpiredSessions(); err != nil {
+				logger.Error("Failed to clean expired sessions", "error", err)
+			}
+			<-ticker.C
+		}
+	}()
+
 	// Create Echo instance
 	e := echo.New()
 
@@ -85,10 +98,20 @@ func main() {
 	e.Server.IdleTimeout = 2 * time.Minute
 	e.Server.MaxHeaderBytes = 1 << 20 // 1 MB max header size
 
+	// Rate limit login/register per IP to slow credential brute-forcing:
+	// bursts of 5 attempts, refilling one attempt every 10 seconds
+	authRateLimiter := middleware.RateLimiter(middleware.NewRateLimiterMemoryStoreWithConfig(
+		middleware.RateLimiterMemoryStoreConfig{
+			Rate:      rate.Limit(0.1),
+			Burst:     5,
+			ExpiresIn: 10 * time.Minute,
+		},
+	))
+
 	// Public routes (no authentication required)
 	// Apply NoCacheMiddleware to prevent browser caching of auth responses
-	e.POST("/api/auth/register", internal.HandleRegister, internal.NoCacheMiddleware)
-	e.POST("/api/auth/login", internal.HandleLogin, internal.NoCacheMiddleware)
+	e.POST("/api/auth/register", internal.HandleRegister, internal.NoCacheMiddleware, authRateLimiter)
+	e.POST("/api/auth/login", internal.HandleLogin, internal.NoCacheMiddleware, authRateLimiter)
 	e.POST("/api/auth/logout", internal.HandleLogout, internal.NoCacheMiddleware)
 
 	// Protected routes (authentication required)
@@ -133,6 +156,9 @@ func main() {
 	// Version endpoint (public, no authentication required)
 	e.GET("/api/version", internal.HandleVersion)
 
+	// Public config endpoint (e.g. whether registration is enabled)
+	e.GET("/api/config", internal.HandleConfig, internal.NoCacheMiddleware)
+
 	// Serve static files from frontend/dist if it exists (for production/Docker)
 	if _, err := os.Stat("./frontend/dist"); err == nil {
 		// Serve static assets (JS, CSS, images, etc.)
@@ -160,18 +186,16 @@ func main() {
 	autoImportService.Start()
 	defer autoImportService.Stop()
 
-	// Start pprof server in a separate goroutine for profiling
-	go func() {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8085"
-		}
-		pprofPort := "6060"
-		logger.Info("Memory profiling available", "url", "http://localhost:"+pprofPort+"/debug/pprof/")
-		if err := http.ListenAndServe(":"+pprofPort, nil); err != nil {
-			logger.Error("pprof server failed", "error", err)
-		}
-	}()
+	// Start pprof server on localhost when profiling is explicitly enabled
+	if os.Getenv("PPROF_ENABLED") == "true" {
+		go func() {
+			pprofAddr := "127.0.0.1:6060"
+			logger.Info("Memory profiling available", "url", "http://"+pprofAddr+"/debug/pprof/")
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				logger.Error("pprof server failed", "error", err)
+			}
+		}()
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
