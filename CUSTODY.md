@@ -102,3 +102,18 @@ calls `custody.reconcile_sbv_import`, which:
 
 The canon-version strings above are duplicated as constants in both
 `internal/custody.go` and `custody.py` and MUST stay in lockstep.
+
+---
+
+## Tag crosswalk note (platform-side, 2026-08-02)
+
+The bare `h3-chain-v1` tag proved ambiguous: the Case Bible vault writes a
+different, equally valid H3 construction (genesis = H1,
+`sha256(prev_hex + h2_hex)`) under the same tag. Platform DB rows written from
+2026-08-02 carry `h3-chain-sbv-genesisempty-v1` for THIS document's
+construction. The Go code below still says `h3-chain-v1` — its computation is
+unchanged; only the platform's stored label gained precision. Legacy rows are
+disambiguated by writer, never relabelled. Why H2/H3 are not independently
+re-derived platform-side: cost of a second full XML canonicalization
+implementation; H1 IS independently re-derived and must agree, and the honest
+scope of the trust is stated above. See docs/DECISION_LOG.md 2026-08-02.
