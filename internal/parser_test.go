@@ -1,6 +1,5 @@
 package internal
 
-
 import (
 	"os"
 	"strings"

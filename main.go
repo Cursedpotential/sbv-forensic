@@ -139,6 +139,19 @@ func main() {
 	// GET /api/hashes/:importID  (importID may be a numeric id or "latest")
 	protected.GET("/hashes/:importID", internal.HandleHashes)
 
+	// Universal import engine + viewer. Every response is scoped to the immutable
+	// import ID returned by POST /imports; these routes never infer "latest".
+	protected.POST("/imports", internal.HandleUniversalImport)
+	protected.GET("/imports", internal.HandleImports)
+	protected.GET("/imports/formats", internal.HandleImportFormats)
+	protected.GET("/imports/:id", internal.HandleImport)
+	protected.GET("/imports/:id/records", internal.HandleImportRecords)
+	protected.GET("/imports/:id/rejections", internal.HandleImportRejections)
+	protected.GET("/imports/:id/attachments", internal.HandleImportAttachments)
+	protected.GET("/imports/:id/attachments/export", internal.HandleImportAttachmentsExport)
+	protected.GET("/imports/:id/attachments/:attachmentID", internal.HandleImportAttachmentDownload)
+	protected.GET("/imports/:id/report", internal.HandleImportEvidenceReport)
+
 	// Phase 5a — native automation endpoints: make SBV headless + agent-drivable
 	// (kick off a custody-preserving extraction, poll it, export it, list backups)
 	// without the Python facade orchestrating an upload+poll loop. Same auth +

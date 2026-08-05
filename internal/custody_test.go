@@ -13,6 +13,7 @@ package internal
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -64,6 +65,25 @@ func TestHashFileH1_MatchesRawByteSha256(t *testing.T) {
 	sum := sha256.Sum256(content)
 	if want := hex.EncodeToString(sum[:]); got != want {
 		t.Fatalf("H1 not a raw-byte sha256:\n got  %s\n want %s", got, want)
+	}
+}
+
+func TestHashReaderH1HashesCurrentDescriptorAndCanBeRewound(t *testing.T) {
+	r := strings.NewReader("abc")
+	got, err := HashReaderH1(r)
+	if err != nil {
+		t.Fatalf("HashReaderH1: %v", err)
+	}
+	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	if got != want {
+		t.Fatalf("H1=%s want %s", got, want)
+	}
+	if _, err := r.Seek(0, 0); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil || string(b) != "abc" {
+		t.Fatalf("post-rewind read=%q err=%v", b, err)
 	}
 }
 

@@ -2,7 +2,6 @@
 
 package internal
 
-
 import (
 	"bytes"
 	"image/jpeg"

@@ -1,0 +1,24 @@
+From: "Alex Example" <alex@example.com>
+To: Owner <owner@example.com>
+Cc: witness@example.com
+Subject: Evidence package
+Date: Tue, 02 Jan 2024 14:30:00 -0500
+Message-ID: <message-1@example.com>
+In-Reply-To: <earlier@example.com>
+References: <first@example.com> <earlier@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="sbv-boundary"
+
+--sbv-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+The plain evidence body.
+--sbv-boundary
+Content-Type: application/pdf; name="filing.pdf"
+Content-Disposition: attachment; filename="filing.pdf"
+Content-Transfer-Encoding: base64
+Content-ID: <filing-1>
+
+ZXZpZGVuY2UtYXR0YWNobWVudA==
+--sbv-boundary--

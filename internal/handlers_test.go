@@ -2,10 +2,9 @@ package internal
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +17,11 @@ var testUserID string
 
 // setupTestDB creates a test database with sample data
 func setupTestDB(t *testing.T) (string, func()) {
-	tmpDB := "test_handlers.db"
-	tmpAuthDB := "test_handlers_auth.db"
-
-	// Clean up any existing test database
-	os.Remove(tmpDB)
-	os.Remove(tmpAuthDB)
+	t.Helper()
+	testDir := t.TempDir()
+	tmpDB := filepath.Join(testDir, "handlers.db")
+	tmpAuthDB := filepath.Join(testDir, "handlers_auth.db")
+	ClearUploadProgress()
 
 	// Initialize auth database first
 	if err := InitAuthDB(tmpAuthDB); err != nil {
@@ -45,7 +43,7 @@ func setupTestDB(t *testing.T) (string, func()) {
 	testUserID = user.ID
 
 	// Initialize user database (using UUID-based filename)
-	userDBPath := fmt.Sprintf("sbv_%s.db", user.ID)
+	userDBPath := filepath.Join(testDir, "sbv_"+user.ID+".db")
 	if err := InitUserDB(user.ID, userDBPath); err != nil {
 		t.Fatalf("Failed to initialize user database: %v", err)
 	}
@@ -87,14 +85,20 @@ func setupTestDB(t *testing.T) (string, func()) {
 	// Return cleanup function
 	cleanup := func() {
 		if db != nil {
-			db.Close()
+			_ = db.Close()
+			db = nil
 		}
-		if userDB != nil {
-			userDB.Close()
+		if authDB != nil {
+			_ = authDB.Close()
+			authDB = nil
 		}
-		os.Remove(tmpDB)
-		os.Remove(tmpAuthDB)
-		os.Remove(userDBPath)
+		userDBsMutex.Lock()
+		for id, openDB := range userDBs {
+			_ = openDB.Close()
+			delete(userDBs, id)
+		}
+		userDBsMutex.Unlock()
+		ClearUploadProgress()
 	}
 
 	return tmpDB, cleanup
@@ -514,6 +518,7 @@ func TestHandleSearchWithLimit(t *testing.T) {
 }
 
 func TestHandleProgress(t *testing.T) {
+	ClearUploadProgress()
 	c, rec := setupTestContext(http.MethodGet, "/api/progress", "")
 
 	if err := HandleProgress(c); err != nil {

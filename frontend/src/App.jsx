@@ -11,6 +11,7 @@ import DateFilter from './components/DateFilter'
 import Upload from './components/Upload'
 import Search from './components/Search'
 import Summary from './components/Summary'
+import EvidenceImports from './components/EvidenceImports'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import SettingsModal from './components/SettingsModal'
 import ThemeToggle from './components/ThemeToggle'
@@ -57,8 +58,10 @@ function App() {
     ? 'calls'
     : location.pathname.startsWith('/search')
     ? 'search'
-    : location.pathname.startsWith('/summary')
-    ? 'summary'
+	: location.pathname.startsWith('/summary')
+	? 'summary'
+	: location.pathname.startsWith('/imports')
+	? 'imports'
     : 'conversations'
 
   useEffect(() => {
@@ -174,6 +177,8 @@ function App() {
       navigate('/search')
     } else if (view === 'summary') {
       navigate('/summary')
+	} else if (view === 'imports') {
+	  navigate('/imports')
     } else {
       navigate('/')
     }
@@ -272,6 +277,15 @@ function App() {
                 <span className="d-none d-sm-inline">Conversations</span>
               </button>
             </li>
+			<li className="nav-item">
+			  <button
+				className={`nav-link ${activeView === 'imports' ? 'active' : ''}`}
+				onClick={() => handleViewChange('imports')}
+			  >
+				<span className="me-sm-1">▦</span>
+				<span className="d-none d-sm-inline">Evidence</span>
+			  </button>
+			</li>
             <li className="nav-item">
               <button
                 className={`nav-link ${activeView === 'calls' ? 'active' : ''}`}
@@ -321,7 +335,7 @@ function App() {
       </div>
 
       {/* Date Filter */}
-      <div className="date-filter-container bg-body-tertiary border-bottom shadow-sm" style={{zIndex: 1025, position: 'relative'}}>
+	  {activeView !== 'imports' && <div className="date-filter-container bg-body-tertiary border-bottom shadow-sm" style={{zIndex: 1025, position: 'relative'}}>
         <DateFilter
           startDate={startDate}
           endDate={endDate}
@@ -330,7 +344,7 @@ function App() {
           onStartDateChange={setStartDate}
           onEndDateChange={setEndDate}
         />
-      </div>
+	  </div>}
 
       {/* Main Content */}
       <div className="flex-fill d-flex overflow-hidden gap-1 p-1 position-relative">
@@ -383,7 +397,11 @@ function App() {
               />
             </div>
           </>
-        ) : activeView === 'search' ? (
+		) : activeView === 'imports' ? (
+		  <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+			<EvidenceImports />
+		  </div>
+		) : activeView === 'search' ? (
           /* Search View */
           <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
             <Search

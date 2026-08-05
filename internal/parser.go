@@ -742,6 +742,12 @@ func SaveUploadedFile(file io.Reader, filename string) (string, string, error) {
 // ParseSMSBackupStreaming so the per-import custody row (H1 + H3 + count) can be
 // written once parsing completes.
 func ProcessUploadedFile(userID string, username string, filePath string, fileHash string) {
+	// The legacy upload path shares SQLite tables and a global progress singleton
+	// with the universal engine. Serialize it with automation/universal imports so
+	// overlapping requests cannot cross-attribute progress or dedup outcomes.
+	importExecutionMu.Lock()
+	defer importExecutionMu.Unlock()
+
 	defer func() {
 		// Always clean up the temp file when done
 		slog.Info("Removing temporary file", "path", filePath)
