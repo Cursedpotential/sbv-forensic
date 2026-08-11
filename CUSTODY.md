@@ -111,9 +111,35 @@ The bare `h3-chain-v1` tag proved ambiguous: the Case Bible vault writes a
 different, equally valid H3 construction (genesis = H1,
 `sha256(prev_hex + h2_hex)`) under the same tag. Platform DB rows written from
 2026-08-02 carry `h3-chain-sbv-genesisempty-v1` for THIS document's
-construction. The Go code below still says `h3-chain-v1` — its computation is
-unchanged; only the platform's stored label gained precision. Legacy rows are
+construction. ~~The Go code below still says `h3-chain-v1`~~ **Corrected
+2026-08-11:** the Go code now names it precisely too — `custodyhash.CanonH3 =
+"h3-chain-sbv-genesisempty-v1"`, with `custodyhash.CanonH3Legacy = "h3-chain-v1"`
+retained read-only for legacy rows. Its computation is unchanged; only the label
+gained precision. Legacy rows are
 disambiguated by writer, never relabelled. Why H2/H3 are not independently
 re-derived platform-side: cost of a second full XML canonicalization
 implementation; H1 IS independently re-derived and must agree, and the honest
 scope of the trust is stated above. See docs/DECISION_LOG.md 2026-08-02.
+
+## Decoupled module — `pkg/custodyhash` (2026-08-11)
+
+The H1/H2/H3 construction now lives in ONE importable Go package,
+`github.com/lowcarbdev/sbv/pkg/custodyhash`, decoupled from SBV's `internal` package. It is the
+single source of truth: `internal/custody.go` are thin shims that delegate to it, and
+`internal/engine.go`'s streaming chain now folds through `custodyhash.FoldChain` instead of a
+hand-inlined `sha256(chain + "\n" + h2)` copy — so a streaming caller and the batch `ChainH3` can
+never diverge, and the `"\n"` separator lives in exactly one place.
+
+**Matching model (the whole point of the decouple).** Any execution site — a Postgres function, a
+DuckDB UDF, an atomic CLI call, a backup workflow, or a thin FastAPI/HTTP mirror — produces
+byte-identical H1/H2/H3 by binding to THIS construction (import the package in Go, or match the
+spec above in another language). The canon tags are exported and named precisely:
+`CanonH1 = h1-rawbytes-v1`, `CanonH2 = h2-rawelement-v1`, `CanonH2Record = h2-rawrecord-v1`,
+`CanonH3 = h3-chain-sbv-genesisempty-v1` (the precise tag for THIS construction),
+`CanonH3Legacy = h3-chain-v1` (read-only; legacy/ambiguous — never used for new writes).
+
+**Non-Go callers (follow-up, not built yet).** A small `net/http` wrapper over the package
+(`/h1`, `/h2`, `/h3`) is the "small Go or FastAPI service" seam so PG/DuckDB/backup call the SAME
+binary rather than re-implementing the fold — the surest anti-drift measure. Until it exists, other
+languages must match the spec byte-for-byte; H1 is the independent cross-check (Python
+`custody.py::_sha256_file` already re-derives and must agree).

@@ -18,13 +18,12 @@ package internal
 // content is unaltered. See CUSTODY.md for the full, auditable specification.
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"time"
+
+	"github.com/lowcarbdev/sbv/pkg/custodyhash"
 )
 
 // Canonicalization version tags — carried alongside every hash so a future
@@ -44,75 +43,37 @@ import (
 //	                   (genesis = "", chain_i = sha256(chain_{i-1} + "\n" + H2_i)),
 //	                   named precisely. All NEW import rows carry this tag; it
 //	                   matches server/evidence/custody.py::H3_CANON.
+// These canon tags now ALIAS the single source of truth in pkg/custodyhash, so the internal
+// call sites that reference them by name keep working and can never drift from the package.
 const (
-	FileHashCanonVersion   = "h1-rawbytes-v1"
-	RecordHashCanonVersion = "h2-rawelement-v1"
-	RecordHashCanonRawV1   = "h2-rawrecord-v1"
-	ChainCanonVersion      = "h3-chain-v1" // legacy tag: pre-existing rows only
-	ChainCanonVersionSBV   = "h3-chain-sbv-genesisempty-v1"
+	FileHashCanonVersion   = custodyhash.CanonH1
+	RecordHashCanonVersion = custodyhash.CanonH2
+	RecordHashCanonRawV1   = custodyhash.CanonH2Record
+	ChainCanonVersion      = custodyhash.CanonH3Legacy // legacy tag: pre-existing rows only
+	ChainCanonVersionSBV   = custodyhash.CanonH3
 )
 
-// HashFileH1 computes the H1 file-level custody hash: the lowercase hex SHA-256
-// of the RAW file bytes, streamed in 1 MiB chunks. This MUST be byte-for-byte
-// equal to server/evidence/custody.py::_sha256_file for the same file (both are
-// a plain SHA-256 over the unmodified bytes — no reformatting, no canonicalization).
-func HashFileH1(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	return HashReaderH1(f)
-}
+// The H1/H2/H3 hashes are defined once in pkg/custodyhash — the decoupled, importable canonical
+// construction that PG / DuckDB / a backup workflow / an atomic call / a FastAPI mirror all bind
+// to, so the same bytes always yield the same hashes regardless of who computes them. These thin
+// shims keep the internal call sites unchanged and can never diverge from the package.
+// See CUSTODY.md for the auditable spec.
 
-// HashReaderH1 computes H1 from the reader's current position. Callers that
-// retain an evidence file can hash and parse the same open descriptor, avoiding
-// a path-based reopen window between custody and extraction.
-func HashReaderH1(r io.Reader) (string, error) {
-	h := sha256.New()
-	buf := make([]byte, 1024*1024)
-	if _, err := io.CopyBuffer(h, r, buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
+// HashFileH1 — H1 file-level custody hash (raw file sha256). See custodyhash.HashFileH1.
+func HashFileH1(path string) (string, error) { return custodyhash.HashFileH1(path) }
 
-// HashBytesSHA256 is the shared primitive: lowercase hex SHA-256 of raw bytes.
-func HashBytesSHA256(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
+// HashReaderH1 — H1 from a reader's current position. See custodyhash.HashReaderH1.
+func HashReaderH1(r io.Reader) (string, error) { return custodyhash.HashReaderH1(r) }
 
-// HashRecordH2 computes the H2 per-record custody hash over the RAW SOURCE
-// element bytes — the exact bytes of a single <sms .../>, <mms>...</mms>, or
-// <call .../> element as they appear in the uploaded XML, from the opening '<'
-// through the closing '>' inclusive, with surrounding inter-element whitespace
-// excluded. It is hashed BEFORE any parsing/normalization so it proves the
-// original record content is unaltered. (h2-rawelement-v1)
-//
-// Determinism: identical raw element bytes always yield the identical hash;
-// any change to the source bytes — including whitespace or formatting our
-// normalizer would later strip — changes the hash. That is the point.
-func HashRecordH2(rawElement []byte) string {
-	return HashBytesSHA256(rawElement)
-}
+// HashBytesSHA256 — the shared primitive: lowercase hex sha256. See custodyhash.HashBytes.
+func HashBytesSHA256(b []byte) string { return custodyhash.HashBytes(b) }
 
-// ChainH3 computes the H3 batch chain digest over the ordered per-record H2
-// hashes, in source (parse) order. It is a left fold:
-//
-//	chain_0 = prevChain                                  (prevChain == "" for a fresh batch)
-//	chain_i = hex(sha256( chain_{i-1} + "\n" + H2_i ))
-//	H3      = chain_n
-//
-// The "\n" separator and the running-hex-then-append construction are fixed by
-// h3-chain-v1. prevChain lets successive import batches be chained end-to-end
-// if ever desired; pass "" for an independent per-import chain.
+// HashRecordH2 — H2 per-record hash over raw source bytes (pre-normalization). See custodyhash.HashRecordH2.
+func HashRecordH2(rawElement []byte) string { return custodyhash.HashRecordH2(rawElement) }
+
+// ChainH3 — H3 batch chain over ordered H2s (genesis "", "\n" fold). See custodyhash.ChainH3.
 func ChainH3(orderedH2s []string, prevChain string) string {
-	chain := prevChain
-	for _, h2 := range orderedH2s {
-		chain = HashBytesSHA256([]byte(chain + "\n" + h2))
-	}
-	return chain
+	return custodyhash.ChainH3(orderedH2s, prevChain)
 }
 
 // trimLeadingXMLSpace drops leading XML insignificant whitespace (space, tab,

@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lowcarbdev/sbv/pkg/custodyhash"
 )
 
 // progressFlushEvery controls how often live counters are flushed to the
@@ -272,7 +274,7 @@ func (s *engineSink) Record(rec *SourceRecord) error {
 	}
 
 	// H3 — fold the H2 into the chain incrementally (genesis "", LF separator).
-	s.chain = HashBytesSHA256([]byte(s.chain + "\n" + h2))
+	s.chain = custodyhash.FoldChain(s.chain, h2)
 	s.hashed++
 
 	if dedup {
@@ -375,7 +377,7 @@ func (s *engineSink) Reject(sourcePos, reason string, raw []byte, rawComplete bo
 			canonName = RecordHashCanonVersion
 		}
 		canon = canonName
-		s.chain = HashBytesSHA256([]byte(s.chain + "\n" + hash))
+		s.chain = custodyhash.FoldChain(s.chain, hash)
 		s.hashed++
 	}
 	if _, err := s.insertRejection.Exec(s.importID, s.seq, sourcePos, reason, string(excerpt), h2, canon); err != nil {
@@ -396,7 +398,7 @@ func (s *engineSink) RejectHashed(sourcePos, reason, h2, canon string, _ int64) 
 	s.seq++
 	s.rejected++
 	s.hashed++
-	s.chain = HashBytesSHA256([]byte(s.chain + "\n" + h2))
+	s.chain = custodyhash.FoldChain(s.chain, h2)
 	if _, err := s.insertRejection.Exec(s.importID, s.seq, sourcePos, reason, "", h2, canon); err != nil {
 		return fmt.Errorf("insert streamed rejection: %w", err)
 	}
