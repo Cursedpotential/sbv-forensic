@@ -860,7 +860,9 @@ func GetImportAttachment(userDB *sql.DB, importID, attachmentID int64) (*ImportA
 
 func ResolveImportArtifact(artifactRoot string, importID int64, relative string) (string, error) {
 	root := filepath.Join(artifactRoot, fmt.Sprintf("import-%d", importID))
-	if strings.HasPrefix(relative, "/") || strings.HasPrefix(relative, `\`) || filepath.VolumeName(relative) != "" {
+	if strings.HasPrefix(relative, "/") || strings.HasPrefix(relative, `\`) || filepath.VolumeName(relative) != "" ||
+		(len(relative) >= 2 && ((relative[0] >= 'A' && relative[0] <= 'Z') ||
+			(relative[0] >= 'a' && relative[0] <= 'z')) && relative[1] == ':') {
 		return "", fmt.Errorf("invalid attachment path")
 	}
 	clean := filepath.Clean(filepath.FromSlash(relative))

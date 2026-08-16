@@ -38,6 +38,7 @@ RUN go mod download
 # Copy backend source
 COPY *.go ./
 COPY internal/*.go internal/
+COPY pkg/ pkg/
 
 # Build with FTS5 support (SQLite). HEIC transcoding disabled: the pinned
 # libheif-go binding no longer compiles against current Alpine libheif (upstream
