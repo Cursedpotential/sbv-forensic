@@ -34,8 +34,20 @@ func TestFacebookJSONGoldenVariantsExactCustodyAndSourceOrder(t *testing.T) {
 	assertFacebookSpoolQuarantined(t, sink.artifactDir)
 
 	firstStart := bytes.Index(source, []byte(`{"sender_name":"Ex","timestamp_ms":1700000300000`))
-	firstEnd := bytes.Index(source[firstStart:], []byte("},\n    {")) + firstStart + 1
-	if firstStart < 0 || firstEnd <= firstStart || !bytes.Equal(sink.records[0].Raw, source[firstStart:firstEnd]) {
+	if firstStart < 0 {
+		t.Fatal("first source record not found")
+	}
+	nextStartOffset := bytes.Index(source[firstStart+1:], []byte(`{"sender_name":`))
+	if nextStartOffset < 0 {
+		t.Fatal("second source record not found")
+	}
+	nextStart := firstStart + 1 + nextStartOffset
+	firstEndOffset := bytes.LastIndexByte(source[firstStart:nextStart], '}')
+	if firstEndOffset < 0 {
+		t.Fatal("first source record boundary not found")
+	}
+	firstEnd := firstStart + firstEndOffset + 1
+	if !bytes.Equal(sink.records[0].Raw, source[firstStart:firstEnd]) {
 		t.Fatalf("first raw span changed: %q", sink.records[0].Raw)
 	}
 	if sink.records[0].RawSize != int64(firstEnd-firstStart) || HashRecordH2(sink.records[0].Raw) != HashRecordH2(source[firstStart:firstEnd]) {

@@ -23,9 +23,24 @@ func TestGoogleChatSingleFileExactObjectsAndUnresolvedContext(t *testing.T) {
 	if len(sink.records) != 2 || sink.rejects != 0 {
 		t.Fatalf("records=%d rejects=%d", len(sink.records), sink.rejects)
 	}
-	firstStart := bytes.Index(source, []byte("{\n      \"creator\""))
-	firstEnd := bytes.Index(source[firstStart:], []byte("\n    }")) + firstStart + len("\n    }")
-	if firstStart < 0 || firstEnd <= firstStart || !bytes.Equal(sink.records[0].Raw, source[firstStart:firstEnd]) {
+	firstStart := bytes.Index(source, []byte("{\r\n      \"creator\""))
+	if firstStart < 0 {
+		firstStart = bytes.Index(source, []byte("{\n      \"creator\""))
+	}
+	if firstStart < 0 {
+		t.Fatal("first source record not found")
+	}
+	nextStartOffset := bytes.Index(source[firstStart+1:], []byte(`{"creator":`))
+	if nextStartOffset < 0 {
+		t.Fatal("second source record not found")
+	}
+	nextStart := firstStart + 1 + nextStartOffset
+	firstEndOffset := bytes.LastIndexByte(source[firstStart:nextStart], '}')
+	if firstEndOffset < 0 {
+		t.Fatal("first source record boundary not found")
+	}
+	firstEnd := firstStart + firstEndOffset + 1
+	if !bytes.Equal(sink.records[0].Raw, source[firstStart:firstEnd]) {
 		t.Fatalf("first raw span changed: %q", sink.records[0].Raw)
 	}
 	if sink.records[0].Content != "The first chat message." || sink.records[0].OccurredAt == nil ||
