@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type SMSBackup struct {
@@ -392,44 +395,88 @@ func isVCardContentType(contentType string) bool {
 
 // extractGroupNameFromTrID extracts the group conversation name from RCS proto: tr_id field
 func extractGroupNameFromTrID(trID string) string {
+	if !strings.HasPrefix(trID, "proto:") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(trID, "proto:"))
+	if err != nil {
+		return ""
+	}
+	candidates, ok := protobufTextFields(decoded)
+	if !ok {
+		return ""
+	}
+	for index := len(candidates) - 1; index >= 0; index-- {
+		if isLikelyGroupName(candidates[index]) {
+			return strings.TrimSpace(candidates[index])
+		}
+	}
 	return ""
-	/*
-		// Check if tr_id starts with "proto:"
-		if !strings.HasPrefix(trID, "proto:") {
-			return ""
+}
+
+// protobufTextFields walks the protobuf wire format rather than relying on a
+// fixed byte offset or one-byte length. Unknown fields and multi-byte varints
+// are skipped according to their wire types; malformed/truncated input fails
+// closed instead of returning a partial label.
+func protobufTextFields(data []byte) ([]string, bool) {
+	texts := make([]string, 0, 2)
+	for offset := 0; offset < len(data); {
+		key, read := binary.Uvarint(data[offset:])
+		if read <= 0 || key>>3 == 0 {
+			return nil, false
 		}
-
-		// Remove the "proto:" prefix
-		protoData := strings.TrimPrefix(trID, "proto:")
-
-		// Base64 decode the remaining bytes
-		decoded, err := base64.StdEncoding.DecodeString(protoData)
-		if err != nil {
-			slog.Error("Failed to base64 decode tr_id", "error", err)
-			return ""
+		offset += read
+		switch key & 7 {
+		case 0:
+			_, read = binary.Uvarint(data[offset:])
+			if read <= 0 {
+				return nil, false
+			}
+			offset += read
+		case 1:
+			if len(data)-offset < 8 {
+				return nil, false
+			}
+			offset += 8
+		case 2:
+			length, lengthBytes := binary.Uvarint(data[offset:])
+			if lengthBytes <= 0 {
+				return nil, false
+			}
+			offset += lengthBytes
+			if length > uint64(len(data)-offset) {
+				return nil, false
+			}
+			value := data[offset : offset+int(length)]
+			offset += int(length)
+			if utf8.Valid(value) {
+				texts = append(texts, string(value))
+			}
+		case 5:
+			if len(data)-offset < 4 {
+				return nil, false
+			}
+			offset += 4
+		default:
+			return nil, false
 		}
+	}
+	return texts, true
+}
 
-		// Check if we have enough bytes (need at least 84 bytes: offset 83 + 1 for length)
-		if len(decoded) < 84 {
-			slog.Debug("Decoded tr_id too short", "bytes", len(decoded), "required", 84)
-			return ""
+func isLikelyGroupName(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || len(trimmed) > 4096 {
+		return false
+	}
+	hasLetter := false
+	for _, r := range trimmed {
+		if !unicode.IsPrint(r) {
+			return false
 		}
-
-		// Read the length byte at offset 83
-		nameLength := int(decoded[83])
-
-		// Check if we have enough bytes for the name
-		if len(decoded) < 84+nameLength {
-			slog.Debug("Not enough bytes for group name", "have", len(decoded), "need", 84+nameLength)
-			return ""
-		}
-
-		// Extract the group name string
-		groupName := string(decoded[84 : 84+nameLength])
-
-		slog.Debug("Extracted group name from tr_id", "group_name", groupName)
-		return groupName
-	*/
+		hasLetter = hasLetter || unicode.IsLetter(r)
+	}
+	return hasLetter
 }
 
 // isHEICContentType checks if a content type is HEIC/HEIF format
@@ -742,6 +789,12 @@ func SaveUploadedFile(file io.Reader, filename string) (string, string, error) {
 // ParseSMSBackupStreaming so the per-import custody row (H1 + H3 + count) can be
 // written once parsing completes.
 func ProcessUploadedFile(userID string, username string, filePath string, fileHash string) {
+	// The legacy upload path shares SQLite tables and a global progress singleton
+	// with the universal engine. Serialize it with automation/universal imports so
+	// overlapping requests cannot cross-attribute progress or dedup outcomes.
+	importExecutionMu.Lock()
+	defer importExecutionMu.Unlock()
+
 	defer func() {
 		// Always clean up the temp file when done
 		slog.Info("Removing temporary file", "path", filePath)

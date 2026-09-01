@@ -10,10 +10,10 @@ package internal
 // and the extraction runner.
 //
 // CUSTODY CONTRACT (unchanged, owner-verified): an extraction runs the EXACT
-// same hashing-BEFORE-normalization path the interactive /api/upload path uses —
+// same hashing-BEFORE-normalization path the universal import API uses —
 //
-//	H1 (raw file, HashFileH1) -> H2 + H3 (ParseSMSBackupStreaming, pre-normalization)
-//	 -> RecordImport (imports row) -> (only THEN) the parser normalizes.
+//	H1 (raw file, HashFileH1) -> immutable import ID -> H2 + H3 (RunImport)
+//	 -> durable dispositions -> (only THEN) the importer projects fields.
 //
 // It never reorders, bypasses, or re-implements custody: it calls the same
 // HashFileH1 and ParseSMSBackupStreaming the upload path calls. The source file
@@ -37,34 +37,36 @@ import (
 // verbatim as the JSON body of POST /api/automation/extract and
 // GET /api/automation/status/:id.
 type ExtractJob struct {
-	ID            string `json:"job_id"`
-	Status        string `json:"status"` // queued | processing | completed | error
-	SourcePath    string `json:"source_path"`
-	Filename      string `json:"filename,omitempty"`
-	MessageCount  int    `json:"message_count"`
-	CallCount     int    `json:"call_count"`
-	RecordCount   int    `json:"record_count"`
-	ImportID      int64  `json:"import_id,omitempty"`
-	FileHash      string `json:"file_hash,omitempty"`  // H1 (raw file sha256 hex)
-	ChainHash     string `json:"chain_hash,omitempty"` // H3 (chain digest over ordered H2s)
-	FileHashCanon string `json:"file_hash_canon,omitempty"`
-	ChainCanon    string `json:"chain_canon,omitempty"`
-	Error         string `json:"error,omitempty"`
-	StartedAt     int64  `json:"started_at"`            // unix seconds (job created)
-	FinishedAt    int64  `json:"finished_at,omitempty"` // unix seconds (terminal)
+	ID                string `json:"job_id"`
+	Status            string `json:"status"` // queued | processing | completed | error
+	SourcePath        string `json:"source_path"`
+	Filename          string `json:"filename,omitempty"`
+	MessageCount      int    `json:"message_count"`
+	CallCount         int    `json:"call_count"`
+	RecordCount       int    `json:"record_count"`
+	ClaimedCount      *int   `json:"claimed_count"`
+	AcceptedCount     int    `json:"accepted_count"`
+	RejectedCount     int    `json:"rejected_count"`
+	DeduplicatedCount int    `json:"deduplicated_count"`
+	Reconciliation    string `json:"reconciliation,omitempty"`
+	Format            string `json:"format,omitempty"`
+	ImportID          int64  `json:"import_id,omitempty"`
+	FileHash          string `json:"file_hash,omitempty"`  // H1 (raw file sha256 hex)
+	ChainHash         string `json:"chain_hash,omitempty"` // H3 (chain digest over ordered H2s)
+	FileHashCanon     string `json:"file_hash_canon,omitempty"`
+	ChainCanon        string `json:"chain_canon,omitempty"`
+	Error             string `json:"error,omitempty"`
+	StartedAt         int64  `json:"started_at"`            // unix seconds (job created)
+	FinishedAt        int64  `json:"finished_at,omitempty"` // unix seconds (terminal)
 }
 
 var (
 	jobsMu sync.RWMutex
 	jobs   = make(map[string]*ExtractJob)
 
-	// extractMu serializes extraction runs. SBV tracks upload progress in a
-	// single global singleton (see UploadProgress) and attributes the resulting
-	// custody row via "latest import", so two concurrent parses would clobber
-	// each other's progress and mis-attribute their imports rows. Serializing
-	// keeps the per-user SQLite DB and the custody attribution correct — SBV is a
-	// single-DB-per-user forensic tool, so this is the intended posture, not a
-	// bottleneck.
+	// extractMu keeps automation jobs FIFO. The engine binds custody by immutable
+	// import ID, and its shared importExecutionMu also serializes these jobs with
+	// interactive legacy/universal uploads to protect SQLite and global progress.
 	extractMu sync.Mutex
 )
 
@@ -134,7 +136,7 @@ func StartExtractJob(userID, username, path, filename string) (*ExtractJob, erro
 	jobs[id] = job
 	jobsMu.Unlock()
 
-	go runExtract(id, userID, username, path)
+	go runExtract(id, userID, username, path, filename)
 
 	snap, _ := snapshotJob(id)
 	return snap, nil
@@ -145,9 +147,9 @@ func StartExtractJob(userID, username, path, filename string) (*ExtractJob, erro
 // source is a caller-supplied server-visible path rather than a multipart temp
 // file, and (b) the source file is NEVER removed (it is evidence, not a scratch
 // upload).
-func runExtract(jobID, userID, username, path string) {
-	// Serialize so the global upload-progress singleton and the "latest import"
-	// custody attribution below are unambiguous.
+func runExtract(jobID, userID, username, path, filename string) {
+	// Keep job execution FIFO; RunImportSequential performs the cross-entry-point
+	// serialization and import-ID attribution.
 	extractMu.Lock()
 	defer extractMu.Unlock()
 
@@ -186,30 +188,43 @@ func runExtract(jobID, userID, username, path string) {
 	}
 	defer file.Close()
 
-	// H2 (per-record, pre-normalization) + H3 (chain) + the imports custody row
-	// all happen INSIDE ParseSMSBackupStreaming — the same call the upload path
-	// makes. Custody ordering is preserved because we reuse it verbatim; batch
-	// size affects only DB-insert batching, never the hashes.
-	msgCount, callCount, err := ParseSMSBackupStreaming(userDB, file, 100, fileHash)
+	// The universal engine detects a registered format plugin, creates the
+	// immutable import row before parsing, and binds every H2/disposition/H3 to
+	// that exact import ID. It never consults "latest" for attribution.
+	summary, err := RunImportSequential(userDB, file, ImportOptions{
+		Filename:     filename,
+		FileHash:     fileHash,
+		OriginalPath: path,
+		ArtifactRoot: filepath.Join(dataDirPath(), userID, "artifacts"),
+	})
 	if err != nil {
+		if summary != nil {
+			mutateJob(jobID, func(j *ExtractJob) { j.ImportID = summary.ImportID })
+		}
 		fail("failed to parse backup: %v", err)
 		return
 	}
 
-	// Because extractions are serialized, the most-recent import row is the one
-	// this job just wrote (H1 file_hash + H3 chain_hash + record_count).
-	rec, rerr := GetLatestImport(userDB)
+	// Fetch only the immutable ID returned by this run. Sequential execution is
+	// a safety property, not an attribution mechanism.
+	rec, rerr := GetImport(userDB, summary.ImportID)
 	if rerr != nil || rec == nil {
 		slog.Warn("Automation extract: could not read custody import row", "job", jobID, "error", rerr)
 	}
 
 	mutateJob(jobID, func(j *ExtractJob) {
 		j.Status = "completed"
-		j.MessageCount = msgCount
-		j.CallCount = callCount
+		j.MessageCount = summary.MessageCount
+		j.CallCount = summary.CallCount
+		j.Format = summary.Format
+		j.ClaimedCount = summary.Claimed
+		j.AcceptedCount = summary.Accepted
+		j.RejectedCount = summary.Rejected
+		j.DeduplicatedCount = summary.Deduplicated
+		j.Reconciliation = summary.Reconciliation
 		j.FileHash = fileHash
 		j.FileHashCanon = FileHashCanonVersion
-		j.ChainCanon = ChainCanonVersion
+		j.ChainCanon = ChainCanonVersionSBV
 		j.FinishedAt = time.Now().Unix()
 		if rec != nil {
 			j.ImportID = rec.ID
@@ -217,7 +232,8 @@ func runExtract(jobID, userID, username, path string) {
 			j.RecordCount = rec.RecordCount
 		}
 	})
-	slog.Info("Automation extract completed", "job", jobID, "messages", msgCount, "calls", callCount, "h1", fileHash)
+	slog.Info("Automation extract completed", "job", jobID, "import_id", summary.ImportID,
+		"format", summary.Format, "accepted", summary.Accepted, "rejected", summary.Rejected, "h1", fileHash)
 }
 
 // waitForJob blocks until the job reaches a terminal state or the timeout
@@ -273,27 +289,10 @@ func dataDirPath() string {
 }
 
 // ListImports returns all custody import rows for the user's DB, newest first.
+// Delegates to the shared scan so each row reports its OWN stored canon tag
+// (legacy rows keep h3-chain-v1; new rows carry h3-chain-sbv-genesisempty-v1).
 func ListImports(userDB *sql.DB) ([]*ImportRecord, error) {
-	rows, err := userDB.Query(
-		`SELECT id, file_hash, record_count, chain_hash, imported_at FROM imports ORDER BY id DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]*ImportRecord, 0)
-	for rows.Next() {
-		var r ImportRecord
-		if err := rows.Scan(&r.ID, &r.FileHash, &r.RecordCount, &r.ChainHash, &r.ImportedAt); err != nil {
-			return nil, err
-		}
-		r.FileHashCanon = FileHashCanonVersion
-		r.RecordHashCanon = RecordHashCanonVersion
-		r.ChainCanon = ChainCanonVersion
-		rc := r
-		out = append(out, &rc)
-	}
-	return out, rows.Err()
+	return ListAllImports(userDB)
 }
 
 // listBackupFiles enumerates the non-hidden, non-log source files retained in the

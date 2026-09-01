@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pytest durable run report</title><style>
+body{font:14px system-ui;margin:0;background:#0b1020;color:#e5e7eb}main{max-width:1500px;margin:auto;padding:24px}
+.cards{display:flex;gap:12px;flex-wrap:wrap}.card{background:#151d31;border:1px solid #334155;border-radius:10px;padding:12px 18px}
+button{background:#1e293b;color:#e5e7eb;border:1px solid #475569;border-radius:7px;padding:7px 10px;cursor:pointer}table{width:100%;border-collapse:collapse;margin-top:18px}
+th,td{border-bottom:1px solid #273449;padding:9px;text-align:left;vertical-align:top}th{position:sticky;top:0;background:#111827}code{font-size:12px}a{color:#93c5fd}
+.pill{border-radius:999px;padding:3px 8px;font-weight:700}.passed{background:#14532d}.skipped{background:#713f12}.failed{background:#7f1d1d}
+</style></head><body><main><h1>Durable pytest report</h1>
+<p>Every test is itemized. Generated 2026-08-18T06:10:23.513530-04:00 (America/New_York) · Codex · GPT-5 · 2026-08-13</p>
+<div class="cards"><div class="card"><b>0</b> passed</div><div class="card"><b>0</b> skipped</div><div class="card"><b>0</b> failed</div><div class="card"><b>0</b> total</div></div>
+<p><button onclick="filterRows('all')">All</button> <button onclick="filterRows('passed')">Passed</button> <button onclick="filterRows('skipped')">Skipped</button> <button onclick="filterRows('failed')">Failed</button></p>
+<table><thead><tr><th>Status</th><th>Test</th><th>Why</th><th>What next</th><th>Source</th></tr></thead><tbody></tbody></table>
+<script>function filterRows(s){document.querySelectorAll('tbody tr').forEach(r=>r.hidden=s!=='all'&&r.dataset.status!==s)}</script>
+</main></body></html>

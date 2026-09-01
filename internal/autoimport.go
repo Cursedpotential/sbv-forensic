@@ -13,10 +13,10 @@ import (
 
 // AutoImportService manages automatic file imports for all users
 type AutoImportService struct {
-	dataDir        string
-	checkInterval  time.Duration
-	cancelFunc     context.CancelFunc
-	ctx            context.Context
+	dataDir       string
+	checkInterval time.Duration
+	cancelFunc    context.CancelFunc
+	ctx           context.Context
 }
 
 // NewAutoImportService creates a new auto-import service
@@ -139,8 +139,8 @@ func (s *AutoImportService) processFile(userID, filePath, filename string) {
 	defer logFile.Close()
 
 	logWriter := &importLogger{
-		file:   logFile,
-		userID: userID,
+		file:     logFile,
+		userID:   userID,
 		filename: filename,
 	}
 

@@ -2,12 +2,11 @@
 
 package internal
 
-
 import (
 	"bytes"
 	"image/jpeg"
 
-	"github.com/strukturag/libheif-go"
+	libheif "github.com/lowcarbdev/libheif-go"
 )
 
 // convertHEICtoJPEG converts HEIC image data to JPEG format

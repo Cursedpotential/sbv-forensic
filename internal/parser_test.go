@@ -1,12 +1,42 @@
 package internal
 
-
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestExtractGroupNameFromTrID(t *testing.T) {
+	for _, name := range []string{"Family Group", strings.Repeat("Long Group ", 16)} {
+		payload := appendProtoVarint(nil, 1, 42)
+		payload = appendProtoBytes(payload, 3, []byte{0xff, 0xfe, 0xfd})
+		payload = appendProtoBytes(payload, 19, []byte(name))
+		if got := extractGroupNameFromTrID("proto:" + base64.StdEncoding.EncodeToString(payload)); got != strings.TrimSpace(name) {
+			t.Fatalf("group name=%q want=%q", got, strings.TrimSpace(name))
+		}
+	}
+	truncated := appendProtoVarint(nil, 2, 99)
+	truncated = append(truncated, byte(4<<3|2), 10, 'x')
+	for _, value := range []string{"", "not-proto", "proto:%%%", "proto:" + base64.StdEncoding.EncodeToString(truncated)} {
+		if got := extractGroupNameFromTrID(value); got != "" {
+			t.Fatalf("malformed tr_id %q produced %q", value, got)
+		}
+	}
+}
+
+func appendProtoVarint(destination []byte, field, value uint64) []byte {
+	destination = binary.AppendUvarint(destination, field<<3)
+	return binary.AppendUvarint(destination, value)
+}
+
+func appendProtoBytes(destination []byte, field uint64, value []byte) []byte {
+	destination = binary.AppendUvarint(destination, field<<3|2)
+	destination = binary.AppendUvarint(destination, uint64(len(value)))
+	return append(destination, value...)
+}
 
 const sampleXML = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
 <?xml-stylesheet type="text/xsl" href="sms.xsl"?>

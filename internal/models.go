@@ -1,6 +1,5 @@
 package internal
 
-
 import "time"
 
 type Message struct {
@@ -23,10 +22,10 @@ type Message struct {
 	ContactName   string `json:"contact_name,omitempty"`
 	Sender        string `json:"sender,omitempty"` // Sender phone number for received messages
 	// Additional MMS fields
-	ContentType string `json:"content_type,omitempty"` // ct_t field
-	ReadReport  int    `json:"read_report,omitempty"`  // rr field
-	ReadStatus  int    `json:"read_status,omitempty"`
-	MessageID   string `json:"message_id,omitempty"`   // m_id field
+	ContentType string   `json:"content_type,omitempty"` // ct_t field
+	ReadReport  int      `json:"read_report,omitempty"`  // rr field
+	ReadStatus  int      `json:"read_status,omitempty"`
+	MessageID   string   `json:"message_id,omitempty"`   // m_id field
 	MessageSize int      `json:"message_size,omitempty"` // m_size field
 	MessageType int      `json:"message_type,omitempty"` // m_type field
 	SimSlot     int      `json:"sim_slot,omitempty"`
@@ -106,10 +105,10 @@ type RegisterRequest struct {
 }
 
 type AuthResponse struct {
-	Success  bool    `json:"success"`
-	User     *User   `json:"user,omitempty"`
-	Session  *Session `json:"session,omitempty"`
-	Error    string  `json:"error,omitempty"`
+	Success bool     `json:"success"`
+	User    *User    `json:"user,omitempty"`
+	Session *Session `json:"session,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type ChangePasswordRequest struct {

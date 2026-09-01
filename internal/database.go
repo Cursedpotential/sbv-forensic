@@ -309,6 +309,15 @@ func GetUserDB(userID string, username string) (*sql.DB, error) {
 }
 
 func InsertMessage(userDB *sql.DB, msg *Message) error {
+	_, err := insertMessageOutcome(userDB, msg)
+	return err
+}
+
+// insertMessageOutcome preserves the legacy insert contract while exposing
+// whether SQLite actually inserted a row. The universal engine needs this to
+// distinguish accepted records from deduplicated records without guessing from
+// a later query (which would race on a shared database connection pool).
+func insertMessageOutcome(userDB *sql.DB, msg *Message) (bool, error) {
 	// Convert addresses slice to JSON string
 	var addressesJSON string
 	if len(msg.Addresses) > 0 {
@@ -363,19 +372,32 @@ func InsertMessage(userDB *sql.DB, msg *Message) error {
 	)
 	if err != nil {
 		slog.Debug("InsertMessage: Error inserting message", "error", err)
-		return err
+		return false, err
 	}
 
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows == 0 {
+		return false, nil
+	}
 	id, err := result.LastInsertId()
 	if err != nil {
-		return err
+		return false, err
 	}
 	msg.ID = id
 
-	return nil
+	return true, nil
 }
 
 func InsertCallLog(userDB *sql.DB, call *CallLog) error {
+	_, err := insertCallLogOutcome(userDB, call)
+	return err
+}
+
+// insertCallLogOutcome is the call-log counterpart of insertMessageOutcome.
+func insertCallLogOutcome(userDB *sql.DB, call *CallLog) (bool, error) {
 	query := `
 		INSERT INTO messages (record_type, address, type, date, duration, presentation, subscription_id, contact_name, content_hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -393,15 +415,22 @@ func InsertCallLog(userDB *sql.DB, call *CallLog) error {
 		call.ContentHash, // H2 per-record custody hash (h2-rawelement-v1)
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows == 0 {
+		return false, nil
+	}
 	id, err := result.LastInsertId()
 	if err != nil {
-		return err
+		return false, err
 	}
 	call.ID = id
-	return nil
+	return true, nil
 }
 
 // InsertCallLogBatch inserts multiple call logs in a single transaction for better performance

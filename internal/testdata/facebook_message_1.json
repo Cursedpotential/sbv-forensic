@@ -1,0 +1,16 @@
+{
+  "participants": [{"name": "MÃ©"}, {"name": "Ex"}, {"name": "Witness 😀"}],
+  "messages": [
+    {"sender_name":"Ex","timestamp_ms":1700000300000,"content":"meet at the cafÃ© 😀","type":"Generic","reactions":[{"reaction":"ð","actor":"MÃ©"}]},
+    {"sender_name":"MÃ©","timestamp_ms":1700000200000,"photos":[{"uri":"your_facebook_activity/messages/inbox/ex/photos/1.jpg","creation_timestamp":1700000200}],"videos":[{"uri":"messages/inbox/ex/videos/1.mp4","creation_timestamp":1700000201}],"audio_files":[{"uri":"audio/voice.amr","creation_timestamp":1700000202}],"files":[{"uri":"../escape.pdf","creation_timestamp":1700000203}],"gifs":[{"uri":"gifs/reaction.gif","creation_timestamp":1700000204}],"sticker":{"uri":"messages/stickers/1.png"},"share":{"link":"https://example.com/post","share_text":"shÃ¡red text","original_content_owner":"CrÃ©ator"}},
+    {"sender_name":"Ex","timestamp_ms":1700000100000,"type":"Call","call_duration":42,"missed":true,"ip":"192.0.2.4"},
+    {"sender_name":"Ex","timestamp_ms":1700000000000,"type":"Subscribe","users":[{"name":"New Member"}],"content":"Ex added New Member."},
+    {"sender_name":"MÃ©","timestamp_ms":1699999900000,"reactions":[{"reaction":"❤","actor":"Ex"}]},
+    {"sender_name":"Witness 😀","content":"No timestamp was exported.","type":"Generic"}
+  ],
+  "title": "GrÃ³up Chat 😀",
+  "is_still_participant": true,
+  "thread_type": "RegularGroup",
+  "thread_path": "inbox/group_123",
+  "magic_words": ["hello"]
+}
