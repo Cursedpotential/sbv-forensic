@@ -1,0 +1,17 @@
+From alex@example.com Tue Jan 02 14:30:00 2024
+From: Alex <alex@example.com>
+To: owner@example.com
+Subject: First
+Date: Tue, 02 Jan 2024 14:30:00 -0500
+Message-ID: <first@example.com>
+Content-Type: text/plain; charset=utf-8
+
+First exact message.
+From owner@example.com Wed Jan 03 09:45:00 2024
+From: owner@example.com
+To: alex@example.com
+Subject: Second without date
+Message-ID: <second@example.com>
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Second <b>HTML</b> message.</p></body></html>

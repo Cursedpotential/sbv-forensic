@@ -1,0 +1,491 @@
+import { useState, useEffect } from 'react'
+import { useNavigate, useLocation, Routes, Route } from 'react-router-dom'
+import { Dropdown } from 'react-bootstrap'
+import axios from 'axios'
+import { useAuth } from './contexts/AuthContext'
+import ConversationList from './components/ConversationList'
+import MessageThread from './components/MessageThread'
+import Activity from './components/Activity'
+import Calls from './components/Calls'
+import DateFilter from './components/DateFilter'
+import Upload from './components/Upload'
+import Search from './components/Search'
+import Summary from './components/Summary'
+import EvidenceImports from './components/EvidenceImports'
+import ChangePasswordModal from './components/ChangePasswordModal'
+import SettingsModal from './components/SettingsModal'
+import ThemeToggle from './components/ThemeToggle'
+import './App.css'
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8085/api'
+
+function App() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { user, logout } = useAuth()
+  const [conversations, setConversations] = useState([])
+  const [conversationsLoading, setConversationsLoading] = useState(false)
+  const [selectedConversation, setSelectedConversation] = useState(null)
+  const [startDate, setStartDate] = useState(null)
+  const [endDate, setEndDate] = useState(null)
+  const [dateRange, setDateRange] = useState({ min: null, max: null })
+  const [showUpload, setShowUpload] = useState(false)
+  const [showPasswordModal, setShowPasswordModal] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const [searchFilter, setSearchFilter] = useState('')
+  const [version, setVersion] = useState('...')
+  const [settings, setSettings] = useState({
+    conversations: {
+      show_calls: true,
+      message_limit: 100000
+    }
+  })
+
+  // Mobile sidebar state
+  const [showSidebar, setShowSidebar] = useState(true)
+
+  // Search state (persisted across tab switches)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchExecuted, setSearchExecuted] = useState(false)
+  const [searchScrollPosition, setSearchScrollPosition] = useState(0)
+
+  // Derive activeView from URL
+  const activeView = location.pathname.startsWith('/activity')
+    ? 'activity'
+    : location.pathname.startsWith('/calls')
+    ? 'calls'
+    : location.pathname.startsWith('/search')
+    ? 'search'
+	: location.pathname.startsWith('/summary')
+	? 'summary'
+	: location.pathname.startsWith('/imports')
+	? 'imports'
+    : 'conversations'
+
+  useEffect(() => {
+    fetchSettings()
+    fetchDateRange()
+    fetchVersion()
+  }, [])
+
+  useEffect(() => {
+    // Fetch conversations after settings are loaded
+    fetchConversations()
+  }, [startDate, endDate, settings])
+
+  const fetchVersion = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/version`)
+      setVersion(response.data.version || 'unknown')
+    } catch (error) {
+      console.error('Failed to fetch version:', error)
+      setVersion('unknown')
+    }
+  }
+
+  const fetchSettings = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/settings`)
+      setSettings(response.data)
+    } catch (error) {
+      console.error('Failed to fetch settings:', error)
+      // Use default settings if fetch fails
+      setSettings({
+        conversations: {
+          show_calls: true,
+          message_limit: 100000
+        }
+      })
+    }
+  }
+
+  // Sync selected conversation from URL and manage sidebar visibility
+  useEffect(() => {
+    const match = location.pathname.match(/^\/conversation\/(.+)$/)
+    if (match) {
+      const address = decodeURIComponent(match[1])
+      // Find conversation by address
+      const conversation = conversations.find(c => c.address === address)
+      if (conversation) {
+        setSelectedConversation(conversation)
+      } else if (conversations.length > 0) {
+        // If conversation not found in list, create a minimal conversation object
+        setSelectedConversation({ address, contact_name: address, type: 'message' })
+      }
+      // Hide sidebar on mobile when viewing a conversation (from direct link or navigation)
+      setShowSidebar(false)
+    } else {
+      // Not viewing a specific conversation
+      setSelectedConversation(null)
+      // Show sidebar when navigating to any non-conversation view
+      setShowSidebar(true)
+    }
+  }, [location.pathname, conversations])
+
+  const fetchDateRange = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/daterange`)
+      setDateRange({
+        min: new Date(response.data.min_date),
+        max: new Date(response.data.max_date)
+      })
+    } catch (error) {
+      console.error('Error fetching date range:', error)
+    }
+  }
+
+  const fetchConversations = async () => {
+    setConversationsLoading(true)
+    try {
+      const params = {}
+      if (startDate) params.start = startDate.toISOString()
+      if (endDate) params.end = endDate.toISOString()
+
+      const response = await axios.get(`${API_BASE}/conversations`, { params })
+      const conversationList = response.data || []
+
+      setConversations(conversationList)
+    } catch (error) {
+      console.error('Error fetching conversations:', error)
+    } finally {
+      setConversationsLoading(false)
+    }
+  }
+
+  const handleUploadSuccess = () => {
+    setShowUpload(false)
+    fetchDateRange()
+    fetchConversations()
+  }
+
+  const handleSelectConversation = (conversation) => {
+    if (conversation) {
+      navigate(`/conversation/${encodeURIComponent(conversation.address)}`)
+      // Hide sidebar on mobile when conversation is selected
+      setShowSidebar(false)
+    }
+  }
+
+  const handleViewChange = (view) => {
+    if (view === 'activity') {
+      navigate('/activity')
+    } else if (view === 'calls') {
+      navigate('/calls')
+    } else if (view === 'search') {
+      navigate('/search')
+    } else if (view === 'summary') {
+      navigate('/summary')
+	} else if (view === 'imports') {
+	  navigate('/imports')
+    } else {
+      navigate('/')
+    }
+  }
+
+  // Filter conversations based on search text
+  const filteredConversations = conversations.filter(conv => {
+    if (!searchFilter) return true
+
+    const searchLower = searchFilter.toLowerCase()
+    const nameMatch = conv.contact_name && conv.contact_name.toLowerCase().includes(searchLower)
+    const addressMatch = conv.address && conv.address.toLowerCase().includes(searchLower)
+
+    return nameMatch || addressMatch
+  })
+
+  return (
+    <div className="vh-100 d-flex flex-column bg-body-tertiary">
+      {/* Header */}
+      <header className="bg-primary bg-gradient text-white py-1 px-2 shadow" style={{zIndex: 1030}}>
+        <div className="d-flex justify-content-between align-items-center">
+          <div className="d-flex align-items-center gap-2">
+            <svg style={{width: '1.75rem', height: '1.75rem'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            <h1 className="h5 mb-0 fw-bold">SMS Backup Viewer</h1>
+          </div>
+          <div className="d-flex align-items-center gap-2">
+            <ThemeToggle />
+            <button
+              onClick={() => setShowUpload(true)}
+              className="btn btn-light btn-sm shadow-sm d-flex align-items-center gap-1"
+            >
+              <svg style={{width: '1rem', height: '1rem'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              <span className="d-none d-sm-inline">Upload</span>
+            </button>
+            <Dropdown align="end">
+              <Dropdown.Toggle
+                variant="outline-light"
+                size="sm"
+                className="d-flex align-items-center"
+                style={{ backgroundColor: 'transparent', borderColor: 'rgba(255, 255, 255, 0.5)' }}
+              >
+                <svg style={{width: '1.25rem', height: '1.25rem'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+              </Dropdown.Toggle>
+              <Dropdown.Menu>
+                <Dropdown.ItemText className="fw-semibold">
+                  {user?.username}
+                </Dropdown.ItemText>
+                <Dropdown.ItemText className="small text-muted">
+                  Version {version}
+                </Dropdown.ItemText>
+                <Dropdown.Divider />
+                <Dropdown.Item onClick={() => setShowSettingsModal(true)}>
+                  <svg style={{width: '1rem', height: '1rem'}} className="me-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  Settings
+                </Dropdown.Item>
+                <Dropdown.Item onClick={() => setShowPasswordModal(true)}>
+                  <svg style={{width: '1rem', height: '1rem'}} className="me-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                  Change Password
+                </Dropdown.Item>
+                <Dropdown.Divider />
+                <Dropdown.Item onClick={logout}>
+                  <svg style={{width: '1rem', height: '1rem'}} className="me-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  Logout
+                </Dropdown.Item>
+              </Dropdown.Menu>
+            </Dropdown>
+          </div>
+        </div>
+      </header>
+
+      {/* View Switcher */}
+      <div className="bg-body-tertiary border-bottom shadow-sm">
+        <div className="container-fluid">
+          <ul className="nav nav-tabs border-0">
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeView === 'conversations' ? 'active' : ''}`}
+                onClick={() => handleViewChange('conversations')}
+              >
+                <svg style={{width: '1rem', height: '1rem'}} className="me-sm-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                </svg>
+                <span className="d-none d-sm-inline">Conversations</span>
+              </button>
+            </li>
+			<li className="nav-item">
+			  <button
+				className={`nav-link ${activeView === 'imports' ? 'active' : ''}`}
+				onClick={() => handleViewChange('imports')}
+			  >
+				<span className="me-sm-1">▦</span>
+				<span className="d-none d-sm-inline">Evidence</span>
+			  </button>
+			</li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeView === 'calls' ? 'active' : ''}`}
+                onClick={() => handleViewChange('calls')}
+              >
+                <svg style={{width: '1rem', height: '1rem'}} className="me-sm-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                </svg>
+                <span className="d-none d-sm-inline">Calls</span>
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeView === 'search' ? 'active' : ''}`}
+                onClick={() => handleViewChange('search')}
+              >
+                <svg style={{width: '1rem', height: '1rem'}} className="me-sm-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <span className="d-none d-sm-inline">Search</span>
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeView === 'activity' ? 'active' : ''}`}
+                onClick={() => handleViewChange('activity')}
+              >
+                <svg style={{width: '1rem', height: '1rem'}} className="me-sm-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="d-none d-sm-inline">Activity</span>
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeView === 'summary' ? 'active' : ''}`}
+                onClick={() => handleViewChange('summary')}
+              >
+                <svg style={{width: '1rem', height: '1rem'}} className="me-sm-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                <span className="d-none d-sm-inline">Summary</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      {/* Date Filter */}
+	  {activeView !== 'imports' && <div className="date-filter-container bg-body-tertiary border-bottom shadow-sm" style={{zIndex: 1025, position: 'relative'}}>
+        <DateFilter
+          startDate={startDate}
+          endDate={endDate}
+          minDate={dateRange.min}
+          maxDate={dateRange.max}
+          onStartDateChange={setStartDate}
+          onEndDateChange={setEndDate}
+        />
+	  </div>}
+
+      {/* Main Content */}
+      <div className="flex-fill d-flex overflow-hidden gap-1 p-1 position-relative">
+        {activeView === 'conversations' ? (
+          <>
+            {/* Conversation List */}
+            <div
+              className={`conversation-sidebar bg-body-tertiary rounded-3 shadow overflow-hidden border ${showSidebar ? 'show' : ''}`}
+            >
+              <div className="bg-body-tertiary border-bottom p-1">
+                <h2 className="h6 mb-1 d-flex align-items-center gap-1 px-1">
+                  <svg style={{width: '1rem', height: '1rem'}} className="text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                  </svg>
+                  Conversations
+                </h2>
+                <div className="position-relative">
+                  <svg style={{width: '0.875rem', height: '0.875rem', position: 'absolute', left: '0.5rem', top: '50%', transform: 'translateY(-50%)'}} className="text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  <input
+                    type="text"
+                    id="conversationFilter"
+                    name="conversationFilter"
+                    className="form-control form-control-sm ps-4"
+                    placeholder="Search..."
+                    aria-label="Filter conversations"
+                    value={searchFilter}
+                    onChange={(e) => setSearchFilter(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="overflow-auto" style={{height: 'calc(100% - 4.5rem)'}}>
+                <ConversationList
+                  conversations={filteredConversations}
+                  selectedConversation={selectedConversation}
+                  onSelectConversation={handleSelectConversation}
+                  loading={conversationsLoading}
+                />
+              </div>
+            </div>
+
+            {/* Message Thread */}
+            <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border message-thread-container" style={{minWidth: 0}}>
+              <MessageThread
+                conversation={selectedConversation}
+                startDate={startDate}
+                endDate={endDate}
+                messageLimit={settings.conversations.message_limit}
+              />
+            </div>
+          </>
+		) : activeView === 'imports' ? (
+		  <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+			<EvidenceImports />
+		  </div>
+		) : activeView === 'search' ? (
+          /* Search View */
+          <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+            <Search
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              results={searchResults}
+              setResults={setSearchResults}
+              loading={searchLoading}
+              setLoading={setSearchLoading}
+              searched={searchExecuted}
+              setSearched={setSearchExecuted}
+              scrollPosition={searchScrollPosition}
+              setScrollPosition={setSearchScrollPosition}
+            />
+          </div>
+        ) : activeView === 'calls' ? (
+          /* Calls View */
+          <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+            <Calls
+              startDate={startDate}
+              endDate={endDate}
+            />
+          </div>
+        ) : activeView === 'summary' ? (
+          /* Summary View */
+          <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+            <Summary
+              startDate={startDate}
+              endDate={endDate}
+            />
+          </div>
+        ) : (
+          /* Activity View */
+          <div className="flex-fill bg-body-secondary rounded-3 shadow overflow-hidden border" style={{minWidth: 0}}>
+            <Activity
+              startDate={startDate}
+              endDate={endDate}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Upload Modal */}
+      {showUpload && (
+        <Upload
+          onClose={() => setShowUpload(false)}
+          onSuccess={handleUploadSuccess}
+        />
+      )}
+
+      {/* Settings Modal */}
+      <SettingsModal
+        show={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        onSettingsUpdated={(newSettings) => {
+          setSettings(newSettings)
+          // Reload conversations if show_calls setting changed
+          fetchConversations()
+        }}
+      />
+
+      {/* Change Password Modal */}
+      {showPasswordModal && (
+        <ChangePasswordModal
+          onClose={() => setShowPasswordModal(false)}
+          onSuccess={() => {
+            // Password changed successfully
+            console.log('Password changed successfully')
+          }}
+        />
+      )}
+
+      {/* Settings Modal */}
+      <SettingsModal
+        show={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        onSettingsUpdated={(newSettings) => {
+          setSettings(newSettings)
+          // Reload conversations if show_calls setting changed
+          fetchConversations()
+        }}
+      />
+    </div>
+  )
+}
+
+export default App

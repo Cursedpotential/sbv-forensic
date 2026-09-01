@@ -1,0 +1,1058 @@
+package internal
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+type SMSBackup struct {
+	XMLName  xml.Name    `xml:"smses"`
+	Count    int         `xml:"count,attr"`
+	Messages []SMSEntry  `xml:"sms"`
+	MMS      []MMSEntry  `xml:"mms"`
+	Calls    []CallEntry `xml:"call"`
+}
+
+type SMSEntry struct {
+	Address       string `xml:"address,attr"`
+	Date          string `xml:"date,attr"`
+	Type          string `xml:"type,attr"`
+	Body          string `xml:"body,attr"`
+	Read          string `xml:"read,attr"`
+	ThreadID      string `xml:"thread_id,attr"`
+	Subject       string `xml:"subject,attr"`
+	Protocol      string `xml:"protocol,attr"`
+	TOA           string `xml:"toa,attr"`
+	SCTOA         string `xml:"sc_toa,attr"`
+	ServiceCenter string `xml:"service_center,attr"`
+	Status        string `xml:"status,attr"`
+	SubID         string `xml:"sub_id,attr"`
+	ReadableDate  string `xml:"readable_date,attr"`
+	ContactName   string `xml:"contact_name,attr"`
+}
+
+type MMSEntry struct {
+	Address      string    `xml:"address,attr"`
+	Date         string    `xml:"date,attr"`
+	Type         string    `xml:"msg_box,attr"`
+	Read         string    `xml:"read,attr"`
+	ThreadID     string    `xml:"thread_id,attr"`
+	Subject      string    `xml:"sub,attr"`
+	TrID         string    `xml:"tr_id,attr"`
+	ContentType  string    `xml:"ct_t,attr"`
+	ReadReport   string    `xml:"rr,attr"`
+	ReadStatus   string    `xml:"read_status,attr"`
+	MessageID    string    `xml:"m_id,attr"`
+	MessageSize  string    `xml:"m_size,attr"`
+	MessageType  string    `xml:"m_type,attr"`
+	SimSlot      string    `xml:"sim_slot,attr"`
+	ReadableDate string    `xml:"readable_date,attr"`
+	ContactName  string    `xml:"contact_name,attr"`
+	Parts        []MMSPart `xml:"parts>part"`
+	Addrs        []MMSAddr `xml:"addrs>addr"`
+	Body         string    `xml:"body,attr"`
+}
+
+type MMSPart struct {
+	Seq         string `xml:"seq,attr"`
+	ContentType string `xml:"ct,attr"`
+	Name        string `xml:"name,attr"`
+	Charset     string `xml:"chset,attr"`
+	CL          string `xml:"cl,attr"`
+	Text        string `xml:"text,attr"`
+	Data        string `xml:"data,attr"`
+}
+
+type MMSAddr struct {
+	Address string `xml:"address,attr"`
+	Type    string `xml:"type,attr"`
+	Charset string `xml:"charset,attr"`
+}
+
+type CallEntry struct {
+	Number         string `xml:"number,attr"`
+	Duration       string `xml:"duration,attr"`
+	Date           string `xml:"date,attr"`
+	Type           string `xml:"type,attr"`
+	Presentation   string `xml:"presentation,attr"`
+	SubscriptionID string `xml:"subscription_id,attr"`
+	ReadableDate   string `xml:"readable_date,attr"`
+	ContactName    string `xml:"contact_name,attr"`
+}
+
+type ParseResult struct {
+	Messages []Message
+	Calls    []CallLog
+}
+
+func ParseSMSBackup(r io.Reader) (ParseResult, error) {
+	var backup SMSBackup
+	decoder := xml.NewDecoder(r)
+	err := decoder.Decode(&backup)
+	if err != nil {
+		return ParseResult{}, err
+	}
+
+	var result ParseResult
+
+	// Parse SMS messages
+	for _, sms := range backup.Messages {
+		msg, err := convertSMSEntry(sms)
+		if err != nil {
+			slog.Error("Error parsing SMS", "error", err)
+			continue
+		}
+		result.Messages = append(result.Messages, msg)
+	}
+
+	// Parse MMS messages
+	for _, mms := range backup.MMS {
+		msg, err := convertMMSEntry(mms)
+		if err != nil {
+			slog.Error("Error parsing MMS", "error", err)
+			continue
+		}
+		result.Messages = append(result.Messages, msg)
+	}
+
+	// Parse call logs
+	for _, call := range backup.Calls {
+		callLog, err := convertCallEntry(call)
+		if err != nil {
+			slog.Error("Error parsing call log", "error", err)
+			continue
+		}
+		result.Calls = append(result.Calls, callLog)
+	}
+
+	return result, nil
+}
+
+func convertSMSEntry(sms SMSEntry) (Message, error) {
+	dateMs, err := strconv.ParseInt(sms.Date, 10, 64)
+	if err != nil {
+		return Message{}, err
+	}
+
+	msgType, _ := strconv.Atoi(sms.Type)
+	read := sms.Read == "1"
+	threadID, _ := strconv.Atoi(sms.ThreadID)
+	protocol, _ := strconv.Atoi(sms.Protocol)
+	status, _ := strconv.Atoi(sms.Status)
+	subID, _ := strconv.Atoi(sms.SubID)
+
+	// Normalize the phone number to remove formatting differences
+	normalizedAddress := normalizePhoneNumber(sms.Address)
+
+	// For SMS, the address is the single phone number
+	addresses := []string{}
+	if normalizedAddress != "" {
+		addresses = append(addresses, normalizedAddress)
+	}
+
+	// For received SMS messages, the sender is the address
+	var sender string
+	if msgType == 1 && normalizedAddress != "" {
+		sender = normalizedAddress
+	}
+
+	return Message{
+		Address:       normalizedAddress,
+		Body:          sms.Body,
+		Type:          msgType,
+		Date:          time.Unix(dateMs/1000, 0),
+		Read:          read,
+		ThreadID:      threadID,
+		Subject:       normalizeNullString(sms.Subject),
+		Protocol:      protocol,
+		Status:        status,
+		ServiceCenter: sms.ServiceCenter,
+		SubID:         subID,
+		ContactName:   sms.ContactName,
+		Sender:        sender,
+		Addresses:     addresses,
+	}, nil
+}
+
+func convertMMSEntry(mms MMSEntry) (Message, error) {
+	dateMs, err := strconv.ParseInt(mms.Date, 10, 64)
+	if err != nil {
+		return Message{}, err
+	}
+
+	msgType, _ := strconv.Atoi(mms.Type)
+	read := mms.Read == "1"
+	threadID, _ := strconv.Atoi(mms.ThreadID)
+	readReport, _ := strconv.Atoi(mms.ReadReport)
+	readStatus, _ := strconv.Atoi(mms.ReadStatus)
+	messageSize, _ := strconv.Atoi(mms.MessageSize)
+	messageType, _ := strconv.Atoi(mms.MessageType)
+	simSlot, _ := strconv.Atoi(mms.SimSlot)
+
+	// Normalize the phone number to remove formatting differences
+	normalizedAddress := normalizePhoneNumber(mms.Address)
+
+	// Extract all addresses from MMS and find the sender (type 137 = FROM)
+	// Include ALL addresses to keep group conversations consistent
+	addressMap := make(map[string]bool)
+	var senderAddress string
+	var firstAddress string
+
+	for _, addr := range mms.Addrs {
+		if addr.Address != "" {
+			// Normalize each address to prevent duplicates due to formatting
+			normalizedAddr := normalizePhoneNumber(addr.Address)
+			if normalizedAddr != "" {
+				addressMap[normalizedAddr] = true
+
+				// Remember the first address we encounter
+				if firstAddress == "" {
+					firstAddress = normalizedAddr
+				}
+
+				// Type 137 (0x89) = FROM (sender in Android MMS)
+				// For received messages, this tells us who sent it
+				addrType, _ := strconv.Atoi(addr.Type)
+				if addrType == 137 {
+					senderAddress = normalizedAddr
+				}
+			}
+		}
+	}
+
+	// If no type 137 sender was found for a received message, use the first address
+	// or the single address for 1-on-1 conversations
+	if msgType == 1 && senderAddress == "" {
+		if len(addressMap) == 1 && firstAddress != "" {
+			// 1-on-1 conversation: the single address is definitely the sender
+			senderAddress = firstAddress
+		} else if len(addressMap) > 1 && firstAddress != "" {
+			// Group conversation without explicit sender: use first address as best guess
+			senderAddress = firstAddress
+		}
+	}
+
+	// Convert map to sorted, deduplicated slice
+	addresses := make([]string, 0, len(addressMap))
+	for addr := range addressMap {
+		addresses = append(addresses, addr)
+	}
+
+	// Sort addresses for consistency
+	sort.Strings(addresses)
+
+	// Determine the primary address field for conversation grouping
+	var primaryAddress string
+	if len(addresses) >= 3 {
+		// Group MMS (3+ participants) - join all normalized addresses to create a consistent group identifier
+		primaryAddress = strings.Join(addresses, ",")
+	} else if len(addresses) > 0 {
+		// MMS with 1-2 addresses - use the normalized address
+		primaryAddress = normalizedAddress
+	} else {
+		// Fallback to normalized mms.Address if no addresses found in mms.Addrs
+		primaryAddress = normalizedAddress
+	}
+
+	// For received messages, store the sender in the Sender field
+	// This allows us to display who sent each message in the UI
+	var sender string
+	if msgType == 1 && senderAddress != "" {
+		// Received message - store the sender address
+		sender = senderAddress
+	}
+
+	msg := Message{
+		Address:     primaryAddress,
+		Type:        msgType,
+		Date:        time.Unix(dateMs/1000, 0),
+		Read:        read,
+		ThreadID:    threadID,
+		Subject:     normalizeNullString(mms.Subject),
+		ContentType: mms.ContentType,
+		ReadReport:  readReport,
+		ReadStatus:  readStatus,
+		MessageID:   mms.MessageID,
+		MessageSize: messageSize,
+		MessageType: messageType,
+		SimSlot:     simSlot,
+		ContactName: mms.ContactName,
+		Sender:      sender,
+		Addresses:   addresses,
+	}
+
+	// Extract body text and media from parts
+	var bodyText string
+	for _, part := range mms.Parts {
+		// Skip SMIL content - it's presentation metadata, not actual message content
+		if isSMILContentType(part.ContentType) {
+			continue
+		}
+
+		// Check for VCF (vCard) files - these are text/* but should be treated as media attachments
+		if isVCardContentType(part.ContentType) && part.Data != "" {
+			if msg.MediaType == "" { // Only store first media item
+				data, err := base64.StdEncoding.DecodeString(part.Data)
+				if err == nil {
+					msg.MediaType = part.ContentType
+					msg.MediaData = data
+				}
+			}
+			continue
+		}
+
+		// Check for media - media parts often have text="null" which should be ignored
+		if part.ContentType != "" && part.Data != "" && !isTextContentType(part.ContentType) {
+			// This is media content (image, video, audio, etc.)
+			if msg.MediaType == "" { // Only store first media item
+				data, err := base64.StdEncoding.DecodeString(part.Data)
+				if err == nil {
+					// Store all media as-is (including HEIC images in original format)
+					msg.MediaType = part.ContentType
+					msg.MediaData = data
+				}
+			}
+		} else if part.Text != "" && normalizeNullString(part.Text) != "" {
+			// This is actual text content (not "null")
+			bodyText += part.Text + " "
+		}
+	}
+
+	if bodyText != "" {
+		msg.Body = strings.TrimSpace(bodyText)
+	}
+
+	// Extract group name from RCS proto: tr_id if available
+	// Use it as the subject if the current subject is empty or starts with "proto:"
+	if mms.TrID != "" && strings.HasPrefix(mms.TrID, "proto:") {
+		groupName := extractGroupNameFromTrID(mms.TrID)
+		if groupName != "" {
+			// Only use the extracted name if subject is empty or also starts with "proto:"
+			if msg.Subject == "" || strings.HasPrefix(mms.Subject, "proto:") {
+				msg.Subject = groupName
+			}
+		}
+	}
+
+	return msg, nil
+}
+
+// normalizeNullString converts the string "null" to an empty string
+func normalizeNullString(s string) string {
+	if strings.TrimSpace(strings.ToLower(s)) == "null" {
+		return ""
+	}
+	return s
+}
+
+// isTextContentType checks if a content type is text-based
+func isTextContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return strings.HasPrefix(ct, "text/") ||
+		ct == "application/xml" ||
+		ct == "application/json"
+}
+
+// isSMILContentType checks if a content type is SMIL markup
+func isSMILContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return ct == "application/smil" ||
+		strings.HasPrefix(ct, "application/smil+") ||
+		strings.Contains(ct, "smil")
+}
+
+// isSMILMarkup checks if the body text is SMIL (Synchronized Multimedia Integration Language) markup
+// which is MMS presentation metadata and should not be displayed to users
+func isSMILMarkup(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	return strings.HasPrefix(trimmed, "<smil") || strings.HasPrefix(trimmed, "<?xml")
+}
+
+// isVCardContentType checks if a content type is vCard format
+func isVCardContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return ct == "text/vcard" || ct == "text/x-vcard" || ct == "text/directory"
+}
+
+// extractGroupNameFromTrID extracts the group conversation name from RCS proto: tr_id field
+func extractGroupNameFromTrID(trID string) string {
+	if !strings.HasPrefix(trID, "proto:") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(trID, "proto:"))
+	if err != nil {
+		return ""
+	}
+	candidates, ok := protobufTextFields(decoded)
+	if !ok {
+		return ""
+	}
+	for index := len(candidates) - 1; index >= 0; index-- {
+		if isLikelyGroupName(candidates[index]) {
+			return strings.TrimSpace(candidates[index])
+		}
+	}
+	return ""
+}
+
+// protobufTextFields walks the protobuf wire format rather than relying on a
+// fixed byte offset or one-byte length. Unknown fields and multi-byte varints
+// are skipped according to their wire types; malformed/truncated input fails
+// closed instead of returning a partial label.
+func protobufTextFields(data []byte) ([]string, bool) {
+	texts := make([]string, 0, 2)
+	for offset := 0; offset < len(data); {
+		key, read := binary.Uvarint(data[offset:])
+		if read <= 0 || key>>3 == 0 {
+			return nil, false
+		}
+		offset += read
+		switch key & 7 {
+		case 0:
+			_, read = binary.Uvarint(data[offset:])
+			if read <= 0 {
+				return nil, false
+			}
+			offset += read
+		case 1:
+			if len(data)-offset < 8 {
+				return nil, false
+			}
+			offset += 8
+		case 2:
+			length, lengthBytes := binary.Uvarint(data[offset:])
+			if lengthBytes <= 0 {
+				return nil, false
+			}
+			offset += lengthBytes
+			if length > uint64(len(data)-offset) {
+				return nil, false
+			}
+			value := data[offset : offset+int(length)]
+			offset += int(length)
+			if utf8.Valid(value) {
+				texts = append(texts, string(value))
+			}
+		case 5:
+			if len(data)-offset < 4 {
+				return nil, false
+			}
+			offset += 4
+		default:
+			return nil, false
+		}
+	}
+	return texts, true
+}
+
+func isLikelyGroupName(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || len(trimmed) > 4096 {
+		return false
+	}
+	hasLetter := false
+	for _, r := range trimmed {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+		hasLetter = hasLetter || unicode.IsLetter(r)
+	}
+	return hasLetter
+}
+
+// isHEICContentType checks if a content type is HEIC/HEIF format
+func isHEICContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return strings.Contains(ct, "heic") || strings.Contains(ct, "heif")
+}
+
+// needsVideoConversion checks if a video format needs conversion for browser compatibility
+func needsVideoConversion(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	unsupportedFormats := []string{
+		"3gpp", "3gp", "3g2", "3gpp2",
+		"video/3gpp", "video/3gp", "video/3gpp2", "video/3g2",
+		"video/x-matroska", // MKV container (may have various codecs)
+	}
+
+	for _, format := range unsupportedFormats {
+		if strings.Contains(ct, format) {
+			return true
+		}
+	}
+	return false
+}
+
+// convertHEICtoJPEG is implemented in heic_enabled.go (with -tags heic) or heic_disabled.go (default)
+// When HEIC support is enabled, it converts HEIC image data to JPEG format
+// When HEIC support is disabled, it returns a placeholder image
+
+// convertVideoToMP4 converts unsupported video formats (like 3GP) to MP4 using ffmpeg
+// Returns the converted MP4 data or an error if conversion fails
+func convertVideoToMP4(videoData []byte) ([]byte, error) {
+	// Create temporary files for input and output
+	tmpInputFile, err := os.CreateTemp("", "video-input-*.3gp")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp input file: %w", err)
+	}
+	defer os.Remove(tmpInputFile.Name())
+	defer tmpInputFile.Close()
+
+	tmpOutputFile, err := os.CreateTemp("", "video-output-*.mp4")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp output file: %w", err)
+	}
+	defer os.Remove(tmpOutputFile.Name())
+	tmpOutputFile.Close()
+
+	// Write input video data to temp file
+	_, err = tmpInputFile.Write(videoData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write input video: %w", err)
+	}
+	tmpInputFile.Close()
+
+	// Run ffmpeg to convert video to MP4 with H.264 codec
+	// -i: input file
+	// -c:v libx264: use H.264 video codec
+	// -c:a aac: use AAC audio codec
+	// -movflags +faststart: optimize for streaming
+	// -preset fast: balance between speed and quality
+	// -crf 23: constant rate factor (quality, lower is better, 23 is good default)
+	cmd := exec.Command("ffmpeg",
+		"-i", tmpInputFile.Name(),
+		"-c:v", "libx264",
+		"-c:a", "aac",
+		"-movflags", "+faststart",
+		"-preset", "fast",
+		"-crf", "23",
+		"-y", // overwrite output file
+		tmpOutputFile.Name(),
+	)
+
+	// Capture stderr for error messages
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg conversion failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	// Read converted video data
+	convertedData, err := os.ReadFile(tmpOutputFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read converted video: %w", err)
+	}
+
+	return convertedData, nil
+}
+
+// needsAudioConversion checks if an audio format needs conversion for browser compatibility
+func needsAudioConversion(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	unsupportedFormats := []string{
+		"audio/amr", "audio/amr-wb",
+		"audio/3gpp", "audio/3gpp2",
+	}
+	for _, format := range unsupportedFormats {
+		if strings.Contains(ct, format) {
+			return true
+		}
+	}
+	return false
+}
+
+// convertAudioToMP3 converts unsupported audio formats (like AMR) to MP3 using ffmpeg
+func convertAudioToMP3(audioData []byte) ([]byte, error) {
+	tmpInputFile, err := os.CreateTemp("", "audio-input-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp input file: %w", err)
+	}
+	defer os.Remove(tmpInputFile.Name())
+	defer tmpInputFile.Close()
+
+	tmpOutputFile, err := os.CreateTemp("", "audio-output-*.mp3")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp output file: %w", err)
+	}
+	defer os.Remove(tmpOutputFile.Name())
+	tmpOutputFile.Close()
+
+	_, err = tmpInputFile.Write(audioData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write input audio: %w", err)
+	}
+	tmpInputFile.Close()
+
+	cmd := exec.Command("ffmpeg",
+		"-i", tmpInputFile.Name(),
+		"-codec:a", "libmp3lame",
+		"-q:a", "2",
+		"-y",
+		tmpOutputFile.Name(),
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg audio conversion failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	convertedData, err := os.ReadFile(tmpOutputFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read converted audio: %w", err)
+	}
+
+	return convertedData, nil
+}
+
+func convertCallEntry(call CallEntry) (CallLog, error) {
+	dateMs, err := strconv.ParseInt(call.Date, 10, 64)
+	if err != nil {
+		return CallLog{}, err
+	}
+
+	duration, _ := strconv.Atoi(call.Duration)
+	callType, _ := strconv.Atoi(call.Type)
+	presentation, _ := strconv.Atoi(call.Presentation)
+
+	// Normalize the phone number to remove formatting differences
+	normalizedNumber := normalizePhoneNumber(call.Number)
+
+	return CallLog{
+		Number:         normalizedNumber,
+		Duration:       duration,
+		Date:           time.Unix(dateMs/1000, 0),
+		Type:           callType,
+		Presentation:   presentation,
+		SubscriptionID: call.SubscriptionID,
+		ContactName:    call.ContactName,
+	}, nil
+}
+
+// UploadProgress tracks the progress of an ongoing upload
+type UploadProgress struct {
+	TotalMessages     int       `json:"total_messages"`
+	ProcessedMessages int       `json:"processed_messages"`
+	TotalCalls        int       `json:"total_calls"`
+	ProcessedCalls    int       `json:"processed_calls"`
+	Status            string    `json:"status"` // "parsing", "importing", "completed", "error"
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	StartTime         time.Time `json:"start_time"`
+	mu                sync.RWMutex
+}
+
+var (
+	uploadProgress     *UploadProgress
+	uploadProgressLock sync.RWMutex
+)
+
+// GetUploadProgress returns the current upload progress
+func GetUploadProgress() *UploadProgress {
+	uploadProgressLock.RLock()
+	defer uploadProgressLock.RUnlock()
+
+	if uploadProgress == nil {
+		return nil
+	}
+
+	uploadProgress.mu.RLock()
+	defer uploadProgress.mu.RUnlock()
+
+	// Return a copy to avoid race conditions
+	return &UploadProgress{
+		TotalMessages:     uploadProgress.TotalMessages,
+		ProcessedMessages: uploadProgress.ProcessedMessages,
+		TotalCalls:        uploadProgress.TotalCalls,
+		ProcessedCalls:    uploadProgress.ProcessedCalls,
+		Status:            uploadProgress.Status,
+		ErrorMessage:      uploadProgress.ErrorMessage,
+		StartTime:         uploadProgress.StartTime,
+	}
+}
+
+// SetUploadProgress initializes or updates the upload progress
+func SetUploadProgress(total, processed int, status string) {
+	uploadProgressLock.Lock()
+	defer uploadProgressLock.Unlock()
+
+	if uploadProgress == nil {
+		uploadProgress = &UploadProgress{
+			StartTime: time.Now(),
+		}
+	}
+
+	uploadProgress.mu.Lock()
+	defer uploadProgress.mu.Unlock()
+
+	uploadProgress.TotalMessages = total
+	uploadProgress.ProcessedMessages = processed
+	uploadProgress.Status = status
+}
+
+// UpdateMessageProgress updates the progress for messages
+func UpdateMessageProgress(processed int) {
+	uploadProgressLock.RLock()
+	defer uploadProgressLock.RUnlock()
+
+	if uploadProgress == nil {
+		return
+	}
+
+	uploadProgress.mu.Lock()
+	defer uploadProgress.mu.Unlock()
+
+	uploadProgress.ProcessedMessages = processed
+}
+
+// UpdateCallProgress updates the progress for calls
+func UpdateCallProgress(processed int) {
+	uploadProgressLock.RLock()
+	defer uploadProgressLock.RUnlock()
+
+	if uploadProgress == nil {
+		return
+	}
+
+	uploadProgress.mu.Lock()
+	defer uploadProgress.mu.Unlock()
+
+	uploadProgress.ProcessedCalls = processed
+}
+
+// ClearUploadProgress clears the upload progress
+func ClearUploadProgress() {
+	uploadProgressLock.Lock()
+	defer uploadProgressLock.Unlock()
+	uploadProgress = nil
+}
+
+// SaveUploadedFile saves the uploaded file to a temporary location and returns
+// the temp path plus the H1 file-level custody hash (h1-rawbytes-v1) — the
+// lowercase-hex SHA-256 of the RAW uploaded bytes, computed as the bytes stream
+// to disk, BEFORE anything parses them. This H1 is byte-for-byte identical to
+// what server/evidence/custody.py::_sha256_file computes for the same file, so
+// the two independently-derived H1s cross-check on the Python side.
+func SaveUploadedFile(file io.Reader, filename string) (string, string, error) {
+	// Create temp directory if it doesn't exist
+	tempDir := os.TempDir()
+	uploadDir := filepath.Join(tempDir, "sbv-uploads")
+	err := os.MkdirAll(uploadDir, 0755)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create upload directory: %v", err)
+	}
+
+	// Create temporary file
+	tempFile, err := os.CreateTemp(uploadDir, "backup-*.xml")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer tempFile.Close()
+
+	// Copy uploaded file to temp file, hashing the RAW bytes in the same pass
+	// (H1 is computed on the original bytes, never on anything reformatted).
+	hasher := sha256.New()
+	_, err = io.Copy(tempFile, io.TeeReader(file, hasher))
+	if err != nil {
+		os.Remove(tempFile.Name())
+		return "", "", fmt.Errorf("failed to save file: %v", err)
+	}
+	fileHash := hex.EncodeToString(hasher.Sum(nil))
+
+	return tempFile.Name(), fileHash, nil
+}
+
+// ProcessUploadedFile processes the uploaded file in the background. fileHash is
+// the H1 custody hash produced by SaveUploadedFile; it is carried through to
+// ParseSMSBackupStreaming so the per-import custody row (H1 + H3 + count) can be
+// written once parsing completes.
+func ProcessUploadedFile(userID string, username string, filePath string, fileHash string) {
+	// The legacy upload path shares SQLite tables and a global progress singleton
+	// with the universal engine. Serialize it with automation/universal imports so
+	// overlapping requests cannot cross-attribute progress or dedup outcomes.
+	importExecutionMu.Lock()
+	defer importExecutionMu.Unlock()
+
+	defer func() {
+		// Always clean up the temp file when done
+		slog.Info("Removing temporary file", "path", filePath)
+		if err := os.Remove(filePath); err != nil {
+			slog.Warn("Failed to remove temp file", "path", filePath, "error", err)
+		}
+	}()
+
+	slog.Info("Starting background processing", "path", filePath, "user", username)
+
+	// Get user database
+	userDB, err := GetUserDB(userID, username)
+	if err != nil {
+		slog.Error("Error getting user database", "error", err)
+		SetUploadProgress(0, 0, "error")
+		uploadProgressLock.Lock()
+		if uploadProgress != nil {
+			uploadProgress.mu.Lock()
+			uploadProgress.ErrorMessage = fmt.Sprintf("Failed to get user database: %v", err)
+			uploadProgress.mu.Unlock()
+		}
+		uploadProgressLock.Unlock()
+		return
+	}
+
+	// Open the file for reading
+	file, err := os.Open(filePath)
+	if err != nil {
+		slog.Error("Error opening file", "error", err)
+		SetUploadProgress(0, 0, "error")
+		uploadProgressLock.Lock()
+		if uploadProgress != nil {
+			uploadProgress.mu.Lock()
+			uploadProgress.ErrorMessage = fmt.Sprintf("Failed to open file: %v", err)
+			uploadProgress.mu.Unlock()
+		}
+		uploadProgressLock.Unlock()
+		return
+	}
+	defer file.Close()
+
+	// Process with streaming parser (batch size 1 for minimal memory)
+	messageCount, callCount, err := ParseSMSBackupStreaming(userDB, file, 1, fileHash) // Insert immediately, no batching
+	if err != nil {
+		slog.Error("Error processing file", "error", err)
+		SetUploadProgress(0, 0, "error")
+		uploadProgressLock.Lock()
+		if uploadProgress != nil {
+			uploadProgress.mu.Lock()
+			uploadProgress.ErrorMessage = fmt.Sprintf("Failed to process file: %v", err)
+			uploadProgress.mu.Unlock()
+		}
+		uploadProgressLock.Unlock()
+		return
+	}
+
+	slog.Info("Completed processing", "messages", messageCount, "calls", callCount)
+}
+
+// ParseSMSBackupStreaming parses SMS backup file with streaming to reduce memory usage
+// Each message is inserted immediately and memory is freed aggressively.
+//
+// FORENSIC ORDERING: for every <sms>/<mms>/<call> element the H2 per-record
+// custody hash is computed on the RAW source element bytes (h2-rawelement-v1)
+// BEFORE the element is decoded/normalized, carried into the row's content_hash,
+// and accumulated in source order. After the stream is exhausted the ordered H2s
+// are folded into the H3 batch chain (h3-chain-v1) and one custody row
+// (file_hash=H1, chain_hash=H3, record_count) is written to the imports table.
+// fileHash is the H1 hash SaveUploadedFile computed over the raw file bytes.
+func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, fileHash string) (int, int, error) {
+	// Initialize progress tracking
+	uploadProgressLock.Lock()
+	uploadProgress = &UploadProgress{
+		Status:    "parsing",
+		StartTime: time.Now(),
+	}
+	uploadProgressLock.Unlock()
+
+	// Wrap the reader so we can extract the RAW byte span of each element after
+	// the decoder consumes it (needed for H2 raw-element hashing).
+	cr := newRawCaptureReader(r)
+	decoder := xml.NewDecoder(cr)
+
+	var messageCount, callCount int
+
+	// Ordered per-record H2 hashes, in raw source order — folded into H3 at end.
+	recordHashes := make([]string, 0, 1024)
+
+	// Track total count from root element if available
+	var totalCount int
+
+	for {
+		// Offset of the end of the previous token == start of the element about to
+		// be read (leading inter-element whitespace is trimmed off the raw span).
+		startOff := decoder.InputOffset()
+
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			SetUploadProgress(0, 0, "error")
+			return messageCount, callCount, err
+		}
+
+		switch elem := token.(type) {
+		case xml.StartElement:
+			// Get total count from root element
+			if elem.Name.Local == "smses" {
+				for _, attr := range elem.Attr {
+					if attr.Name.Local == "count" {
+						totalCount, _ = strconv.Atoi(attr.Value)
+						uploadProgressLock.Lock()
+						uploadProgress.mu.Lock()
+						uploadProgress.TotalMessages = totalCount
+						uploadProgress.mu.Unlock()
+						uploadProgressLock.Unlock()
+					}
+				}
+			}
+
+			// Process SMS messages
+			if elem.Name.Local == "sms" {
+				var sms SMSEntry
+				err := decoder.DecodeElement(&sms, &elem)
+				if err != nil {
+					slog.Error("Error decoding SMS", "error", err)
+					continue
+				}
+
+				// H2: hash the RAW <sms> element bytes BEFORE any conversion.
+				endOff := decoder.InputOffset()
+				h2 := HashRecordH2(trimLeadingXMLSpace(cr.slice(startOff, endOff)))
+				cr.discardBefore(endOff)
+
+				msg, err := convertSMSEntry(sms)
+				if err != nil {
+					slog.Error("Error converting SMS", "error", err)
+					continue
+				}
+				msg.ContentHash = h2
+
+				// Insert immediately - no batching
+				err = InsertMessage(userDB, &msg)
+				if err != nil {
+					slog.Error("Error inserting message", "error", err)
+				} else {
+					messageCount++
+					recordHashes = append(recordHashes, h2)
+					UpdateMessageProgress(messageCount)
+				}
+
+				// Force garbage collection every 1000 messages to keep memory low
+				if messageCount%1000 == 0 {
+					runtime.GC()
+				}
+			}
+
+			// Process MMS messages
+			if elem.Name.Local == "mms" {
+				var mms MMSEntry
+				err := decoder.DecodeElement(&mms, &elem)
+				if err != nil {
+					slog.Error("Error decoding MMS", "error", err)
+					continue
+				}
+
+				// H2: hash the RAW <mms> element bytes (incl. base64 parts) BEFORE
+				// any conversion/base64-decode/normalization.
+				endOff := decoder.InputOffset()
+				h2 := HashRecordH2(trimLeadingXMLSpace(cr.slice(startOff, endOff)))
+				cr.discardBefore(endOff)
+
+				msg, err := convertMMSEntry(mms)
+
+				// Clear the MMS struct immediately after conversion to free base64 strings
+				mms.Parts = nil
+				mms = MMSEntry{}
+
+				if err != nil {
+					slog.Error("Error converting MMS", "error", err)
+					continue
+				}
+				msg.ContentHash = h2
+
+				// Insert immediately - no batching
+				err = InsertMessage(userDB, &msg)
+				if err != nil {
+					slog.Error("Error inserting message", "error", err)
+				} else {
+					messageCount++
+					recordHashes = append(recordHashes, h2)
+					UpdateMessageProgress(messageCount)
+				}
+
+				// Clear the message data immediately after insert
+				msg.MediaData = nil
+				msg = Message{}
+
+				// Force garbage collection every 100 MMS messages (they're larger)
+				if messageCount%100 == 0 {
+					runtime.GC()
+				}
+			}
+
+			// Process call logs
+			if elem.Name.Local == "call" {
+				var call CallEntry
+				err := decoder.DecodeElement(&call, &elem)
+				if err != nil {
+					slog.Error("Error decoding call", "error", err)
+					continue
+				}
+
+				// H2: hash the RAW <call> element bytes BEFORE any conversion.
+				endOff := decoder.InputOffset()
+				h2 := HashRecordH2(trimLeadingXMLSpace(cr.slice(startOff, endOff)))
+				cr.discardBefore(endOff)
+
+				callLog, err := convertCallEntry(call)
+				if err != nil {
+					slog.Error("Error converting call", "error", err)
+					continue
+				}
+				callLog.ContentHash = h2
+
+				// Insert immediately - no batching
+				err = InsertCallLog(userDB, &callLog)
+				if err != nil {
+					slog.Error("Error inserting call log", "error", err)
+				} else {
+					callCount++
+					recordHashes = append(recordHashes, h2)
+					uploadProgressLock.Lock()
+					uploadProgress.mu.Lock()
+					uploadProgress.TotalCalls++
+					uploadProgress.ProcessedCalls = callCount
+					uploadProgress.mu.Unlock()
+					uploadProgressLock.Unlock()
+				}
+			}
+		}
+	}
+
+	// Final garbage collection
+	runtime.GC()
+
+	// H3: fold the ordered per-record H2s into the batch chain digest and record
+	// the per-import custody summary (H1 file hash + H3 chain + record count).
+	chainHash := ChainH3(recordHashes, "")
+	if _, err := RecordImport(userDB, fileHash, len(recordHashes), chainHash); err != nil {
+		// A custody-row failure must not lose the parsed data, but it IS a
+		// forensic gap — surface it loudly rather than swallowing it.
+		slog.Error("Error recording import custody row", "error", err, "file_hash", fileHash, "records", len(recordHashes))
+	}
+
+	// Mark as completed
+	SetUploadProgress(messageCount, messageCount, "completed")
+
+	return messageCount, callCount, nil
+}
