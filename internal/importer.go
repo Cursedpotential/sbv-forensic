@@ -57,9 +57,14 @@ const (
 const (
 	maxRawRecordBytes  = 64 << 20 // one materialized record (MMS data uses the streaming exception)
 	maxLineRecordBytes = 16 << 20 // one NDJSON line / one CSV record
-	maxCSVFields       = 1024
-	detectPeekBytes    = 8192
-	rejectExcerptBytes = 512
+	// maxStartElementBytes bounds one XML start tag. A real <sms>/<call> start
+	// tag is a few KB; anything larger means attribute scanning desynchronised
+	// (an unescaped quote), so the scan stops early and the span is resynced
+	// instead of running to the whole-record bound.
+	maxStartElementBytes = 1 << 20
+	maxCSVFields         = 1024
+	detectPeekBytes      = 8192
+	rejectExcerptBytes   = 512
 )
 
 // SourceRecord is one raw logical source record an importer encountered, plus

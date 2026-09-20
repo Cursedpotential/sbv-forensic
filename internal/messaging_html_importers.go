@@ -23,10 +23,10 @@ func (imessageHTMLImporter) Detect(head []byte, filename string) bool {
 		return false
 	}
 	s := strings.ToLower(string(head))
-	stock := strings.Contains(s, `class="message`) &&
-		(strings.Contains(s, `class="sent`) || strings.Contains(s, `class="received`)) &&
-		(strings.Contains(s, `class="timestamp`) || strings.Contains(s, `class="sender`))
-	owner := strings.Contains(s, `class="bubble from-me`) || strings.Contains(s, `class="bubble from-them`)
+	stock := htmlHasClassPrefix(s, "message") &&
+		(htmlHasClassPrefix(s, "sent") || htmlHasClassPrefix(s, "received")) &&
+		(htmlHasClassPrefix(s, "timestamp") || htmlHasClassPrefix(s, "sender"))
+	owner := htmlHasClassPrefix(s, "bubble from-me") || htmlHasClassPrefix(s, "bubble from-them")
 	return stock || owner
 }
 func (imessageHTMLImporter) Run(sink ImportSink, r *bufio.Reader) error {
@@ -43,8 +43,18 @@ func (facebookHTMLImporter) Detect(head []byte, filename string) bool {
 	if strings.Contains(s, `_a6-g`) && strings.Contains(s, `_a6-h`) {
 		return true
 	}
-	return strings.Contains(s, `class="message`) && strings.Contains(s, `class="meta`) &&
-		!strings.Contains(s, `class="sent`) && !strings.Contains(s, `class="received`)
+	return htmlHasClassPrefix(s, "message") && htmlHasClassPrefix(s, "meta") &&
+		!htmlHasClassPrefix(s, "sent") && !htmlHasClassPrefix(s, "received")
+}
+
+// htmlHasClassPrefix reports whether the head declares a class attribute whose
+// value starts with prefix, under either quoting style. Real exports use single
+// quotes as readily as double, and matching only `class="` made detection
+// silently claim nothing for a perfectly valid export.
+func htmlHasClassPrefix(lowerHead, prefix string) bool {
+	return strings.Contains(lowerHead, `class="`+prefix) ||
+		strings.Contains(lowerHead, `class='`+prefix) ||
+		strings.Contains(lowerHead, `class=`+prefix)
 }
 func (facebookHTMLImporter) Run(sink ImportSink, r *bufio.Reader) error {
 	return runHTMLRecords(sink, r, "facebook")
@@ -97,7 +107,12 @@ func runHTMLRecords(sink ImportSink, r io.Reader, platform string) error {
 		raw := append([]byte(nil), z.Raw()...)
 		tok := z.Token()
 		isTarget, linger := htmlRecordStart(tok, tt, platform)
-		if current != nil && current.linger && current.depth == 0 && isTarget {
+		// depth is signed and relative to the record's own start tag, so a new
+		// target at depth <= 0 is at or above the open record's level and must
+		// flush it. Exports that wrap each bubble in an unclassed <div> leave
+		// depth negative after the wrapper closes; clamping it at zero used to
+		// swallow every later bubble into the first record.
+		if current != nil && current.linger && current.depth <= 0 && isTarget {
 			if err := flush(); err != nil {
 				return err
 			}
@@ -124,9 +139,7 @@ func runHTMLRecords(sink ImportSink, r io.Reader, platform string) error {
 		case html.StartTagToken:
 			current.depth++
 		case html.EndTagToken:
-			if current.depth > 0 {
-				current.depth--
-			}
+			current.depth--
 		}
 		if current.depth == 0 && !current.linger {
 			if err := flush(); err != nil {

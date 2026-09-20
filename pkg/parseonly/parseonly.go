@@ -71,6 +71,34 @@ func Formats() []string {
 	return formats
 }
 
+// DetectHeadBytes is how many leading bytes of a source DetectFormat needs.
+const DetectHeadBytes = 8192
+
+// DetectFormat identifies the canonical platform format for a source from its
+// leading bytes and filename, so callers never have to guess a format id.
+// Guessing is not a harmless default: an iMessage TXT export that uses the
+// "[YYYY-MM-DD HH:MM AM/PM] sender:" grammar parses to zero records under
+// imessage_txt and to every record under messages_transcript, with no error
+// either way. Returns false when no importer claims the source, or when the
+// matched importer is one New refuses (the email importers).
+func DetectFormat(head []byte, filename string) (string, bool) {
+	importer := internal.DetectImporter(head, filename)
+	if importer == nil {
+		return "", false
+	}
+	sbvFormat := importer.Format()
+	for _, mapping := range formatMappings {
+		if mapping.SBV != sbvFormat {
+			continue
+		}
+		if mapping.Canonical == FormatEML || mapping.Canonical == FormatMBOX {
+			return "", false
+		}
+		return mapping.Canonical, true
+	}
+	return "", false
+}
+
 // Importer is a parse-only facade around one registered SBV importer.
 type Importer struct {
 	canonical string
