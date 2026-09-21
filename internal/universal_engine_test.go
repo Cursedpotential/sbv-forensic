@@ -106,6 +106,48 @@ func TestSMSXMLImporterKeepsAttachmentOnlyMMS(t *testing.T) {
 	}
 }
 
+// A part that names a file but carries no bytes used to vanish: no attachment,
+// no failure, no reference. It must surface as a source-reported-missing
+// reference, captioned or not (owner requirement 2026-09-20: missing-payload
+// checks on ingestion). Byline: Claude Code · Fable 5.1 · 2026-09-20.
+func TestSMSXMLImporterReportsPartsWithoutPayload(t *testing.T) {
+	xmlSource := `<smses count="1"><mms date="1756490841000" msg_box="2"><parts>` +
+		`<part seq="-1" ct="application/smil" cl="smil.xml" text="&lt;smil/&gt;" />` +
+		`<part seq="0" ct="text/plain" cl="text.000000.txt" text="look at these" />` +
+		`<part seq="0" ct="image/jpeg" cl="kept.jpg" data="aW1hZ2U=" />` +
+		// the exact shape of the 16 real gaps in sms-20251206203434.xml: data=""
+		`<part seq="0" ct="image/heif" name="null" cid="&lt;gone.jpg&gt;" cl="gone.jpg" text="null" data="" />` +
+		`<part seq="0" ct="image/jpeg" cl="absent.jpg" text="null" />` +
+		`</parts><addrs><addr address="+15551234567" type="151" /></addrs></mms></smses>`
+	sink := &captureSink{artifactDir: t.TempDir()}
+	if err := (smsXMLImporter{}).Run(sink, bufio.NewReader(strings.NewReader(xmlSource))); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(sink.records) != 1 || sink.rejects != 0 {
+		t.Fatalf("records=%d rejects=%d", len(sink.records), sink.rejects)
+	}
+	rec := sink.records[0]
+	if rec.LegacyMessage == nil || rec.LegacyMessage.Body != "look at these" {
+		t.Fatalf("caption lost: %+v", rec.LegacyMessage)
+	}
+	if len(rec.Attachments) != 1 || rec.Attachments[0].OriginalName != "kept.jpg" {
+		t.Fatalf("embedded attachment manifest: %+v", rec.Attachments)
+	}
+	if len(rec.AttachmentReferences) != 2 {
+		t.Fatalf("payload-less parts not reported: %+v", rec.AttachmentReferences)
+	}
+	for index, want := range []string{"gone.jpg", "absent.jpg"} {
+		ref := rec.AttachmentReferences[index]
+		if ref.Kind != "mms_part_without_payload" || ref.URIOriginal != want ||
+			ref.ResolutionStatus != AttachmentSourceReportedMissing || !ref.SourceReportedMissing {
+			t.Fatalf("reference %d = %+v", index, ref)
+		}
+	}
+	if !strings.Contains(rec.AttachmentReferences[0].DisplayText, "image/heif") {
+		t.Fatalf("content type not preserved: %+v", rec.AttachmentReferences[0])
+	}
+}
+
 func TestSMSXMLImporterStreamsAttachmentLargerThanWorkBuffer(t *testing.T) {
 	// Generate an 8 MiB decoded part through an io.Pipe. Neither the test nor the
 	// importer ever assembles the encoded attribute or raw MMS element in memory.

@@ -558,6 +558,12 @@ func streamMMSRecordInto(sink ImportSink, r *bufio.Reader, prefix []byte, pos st
 		return nil, fmt.Errorf("decode sanitized MMS: %w", err)
 	}
 	attachments := make([]AttachmentArtifact, 0, len(drafts))
+	// A part that names a payload but carries no bytes (data="" in real exports,
+	// or no data attribute) is a gap in THIS backup, not a zero-byte attachment.
+	// It becomes a source-reported-missing reference so the missing-payload check
+	// can record it against the message (owner requirement 2026-09-20).
+	var withoutPayload []AttachmentReference
+	associated := 0
 	matchedDrafts := make([]bool, len(drafts))
 	for partIndex := range entry.Parts {
 		part := &entry.Parts[partIndex]
@@ -569,6 +575,17 @@ func streamMMSRecordInto(sink ImportSink, r *bufio.Reader, prefix []byte, pos st
 			}
 			if matchedDrafts[draftIndex] {
 				return nil, fmt.Errorf("MMS attachment marker %d appeared more than once", draftIndex)
+			}
+			if draft.bytes == 0 && draft.decodeErr == "" && mmsPartExpectsPayload(*part) {
+				if err := os.Remove(draft.path); err != nil && !os.IsNotExist(err) {
+					return nil, err
+				}
+				withoutPayload = append(withoutPayload, mmsPartWithoutPayloadReference(*part))
+				matchedDrafts[draftIndex] = true
+				matchedPart = true
+				associated++
+				part.Data = ""
+				break
 			}
 			name := sanitizedAttachmentName(part.Name, part.CL, draftIndex)
 			// part sequence repeats for every MMS, so include the source position;
@@ -586,15 +603,19 @@ func streamMMSRecordInto(sink ImportSink, r *bufio.Reader, prefix []byte, pos st
 			})
 			matchedDrafts[draftIndex] = true
 			matchedPart = true
+			associated++
 			part.Data = ""
 			break
 		}
 		if !matchedPart && strings.TrimSpace(part.Data) != "" {
 			return nil, fmt.Errorf("MMS inline data escaped lossless capture at part %d", partIndex)
 		}
+		if !matchedPart && mmsPartExpectsPayload(*part) {
+			withoutPayload = append(withoutPayload, mmsPartWithoutPayloadReference(*part))
+		}
 	}
-	if len(attachments) != len(drafts) {
-		return nil, fmt.Errorf("MMS captured %d inline payloads but associated %d parts", len(drafts), len(attachments))
+	if associated != len(drafts) {
+		return nil, fmt.Errorf("MMS captured %d inline payloads but associated %d parts", len(drafts), associated)
 	}
 	msg, err := convertMMSEntry(entry)
 	if err != nil {
@@ -608,7 +629,31 @@ func streamMMSRecordInto(sink ImportSink, r *bufio.Reader, prefix []byte, pos st
 	rec.PrecomputedH2 = hex.EncodeToString(h.Sum(nil))
 	rec.RawSize = rawSize
 	rec.Attachments = attachments
+	rec.AttachmentReferences = append(rec.AttachmentReferences, withoutPayload...)
 	return rec, nil
+}
+
+const mmsPartWithoutPayloadKind = "mms_part_without_payload"
+
+// mmsPartExpectsPayload is true for a media part: not the SMIL layout, not text.
+func mmsPartExpectsPayload(part MMSPart) bool {
+	ct := strings.ToLower(strings.TrimSpace(part.ContentType))
+	return ct != "" && ct != "null" && ct != "application/smil" && !strings.HasPrefix(ct, "text/")
+}
+
+func mmsPartWithoutPayloadReference(part MMSPart) AttachmentReference {
+	name := part.CL
+	if name == "" || name == "null" {
+		name = part.Name
+	}
+	if name == "null" {
+		name = ""
+	}
+	return AttachmentReference{
+		Kind: mmsPartWithoutPayloadKind, URIOriginal: name,
+		DisplayText:      fmt.Sprintf("ct=%s seq=%s", part.ContentType, part.Seq),
+		ResolutionStatus: AttachmentSourceReportedMissing, SourceReportedMissing: true,
+	}
 }
 
 // captureMMSDataAttribute recognizes the XML attribute grammar
